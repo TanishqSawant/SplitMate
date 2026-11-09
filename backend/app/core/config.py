@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "uploads"
     MAX_UPLOAD_SIZE_MB: int = 10
 
+    # Internal service authentication (used by Pawan's AI extraction service)
+    INTERNAL_SERVICE_SECRET: str = ""
+
     # PayPal Sandbox (Tanay configures these)
     PAYPAL_CLIENT_ID: str = ""
     PAYPAL_CLIENT_SECRET: str = ""

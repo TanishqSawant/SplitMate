@@ -185,9 +185,10 @@ export function ExpenseProvider({ children }) {
 
       // Step 2: Request extraction from Pawan's endpoint
       const formData = new FormData();
-      formData.append('receipt', file);
+      // FastAPI's upload_receipt endpoint expects the multipart field name 'file'.
+      formData.append('file', file);
 
-      const extraction = await apiClient.request(API_ENDPOINTS.RECEIPTS.EXTRACT, {
+      const uploadedReceipt = await apiClient.request(API_ENDPOINTS.RECEIPTS.UPLOAD, {
         method: 'POST',
         body: formData,
         isFormData: true,
@@ -195,6 +196,32 @@ export function ExpenseProvider({ children }) {
 
       setReceiptScan((prev) => ({ ...prev, progress: 100 }));
       await new Promise((r) => setTimeout(r, 400));
+
+      // The current backend upload endpoint stores the receipt but does not run OCR.
+      // It returns extraction_status='pending' until the AI service submits results.
+      if (!uploadedReceipt.items || uploadedReceipt.items.length === 0) {
+        setReceiptScan((prev) => ({
+          ...prev,
+          status: 'error',
+          receiptId: uploadedReceipt.id,
+          error: 'Receipt uploaded successfully, but AI extraction is not connected to the backend yet.',
+        }));
+        return;
+      }
+
+      const extraction = {
+        merchant: uploadedReceipt.merchant_name,
+        currency: uploadedReceipt.currency,
+        subtotal: uploadedReceipt.subtotal,
+        tax: uploadedReceipt.tax,
+        total: uploadedReceipt.total,
+        items: uploadedReceipt.items.map((item) => ({
+          id: item.id,
+          name: item.item_name,
+          quantity: item.quantity,
+          price: item.total_price,
+        })),
+      };
 
       // Items default assignment: assign each to all members of activeGroup or currentUser
       const defaultMembers = activeGroup?.members?.map((m) => m.userId) || [currentUser.id];

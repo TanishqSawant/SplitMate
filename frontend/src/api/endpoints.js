@@ -37,7 +37,8 @@ export const API_ENDPOINTS = {
 
   // AI Receipt Extraction (Pawan)
   RECEIPTS: {
-    EXTRACT: '/receipts/extract',
+    UPLOAD: '/receipts/upload',
+    SUBMIT_EXTRACTION: (receiptId) => `/receipts/${receiptId}/extraction`,
     SAMPLE_RECEIPTS: '/receipts/samples',
   },
 
