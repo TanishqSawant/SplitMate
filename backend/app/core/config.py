@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     PAYPAL_CLIENT_ID: str = ""
     PAYPAL_CLIENT_SECRET: str = ""
     PAYPAL_BASE_URL: str = "https://api-m.sandbox.paypal.com"
+    PAYPAL_TIMEOUT_SECONDS: float = 10.0
 
     @property
     def cors_origin_list(self) -> list[str]:

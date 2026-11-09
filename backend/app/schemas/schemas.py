@@ -181,7 +181,8 @@ class SplitsResponse(BaseModel):
 
 class PaymentCreateOrderRequest(BaseModel):
     """Triggers PayPal order creation. Tanay implements the actual integration."""
-    pass  # payment_id is in the URL path
+    return_url: str | None = None
+    cancel_url: str | None = None
 
 
 class PaymentCaptureRequest(BaseModel):
@@ -198,10 +199,34 @@ class PaymentResponse(BaseModel):
     paypal_order_id: str | None
     paypal_capture_id: str | None
     status: str
+    approval_url: str | None = None
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PaymentDirectCreateOrderRequest(BaseModel):
+    """Payload for frontend compatibility calling /api/payments/paypal/create-order."""
+    payment_id: UUID | None = None
+    payer_id: UUID | None = Field(default=None, alias="payerId")
+    expense_id: UUID | None = Field(default=None, alias="expenseId")
+    receiver_email: str | None = Field(default=None, alias="receiverEmail")
+    amount: Decimal | None = None
+    currency: str | None = "USD"
+    note: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class PaymentDirectCaptureRequest(BaseModel):
+    """Payload for frontend compatibility calling /api/payments/paypal/capture-order."""
+    order_id: str = Field(..., alias="orderId", min_length=1, max_length=50)
+    payment_id: UUID | None = None
+    payer_id: UUID | None = Field(default=None, alias="payerId")
+    amount: Decimal | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 # ---------------------------------------------------------------------------
