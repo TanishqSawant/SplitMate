@@ -48,7 +48,9 @@ class ApiClient {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2000);
 
-      const response = await fetch(`${this.baseURL}${API_ENDPOINTS.HEALTH}`, {
+      // The health router is mounted at /health (outside the /api-prefixed routers).
+      const healthBaseURL = this.baseURL.replace(/\/api\/?$/, '');
+      const response = await fetch(`${healthBaseURL}${API_ENDPOINTS.HEALTH}`, {
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
@@ -175,12 +177,13 @@ class ApiClient {
     }
 
     // 5. AI Receipt Extraction (Pawan's contract)
-    if (endpoint === API_ENDPOINTS.RECEIPTS.EXTRACT) {
+    if (endpoint === API_ENDPOINTS.RECEIPTS.UPLOAD) {
       // Simulate Pawan's AI vision extraction response
       await new Promise((r) => setTimeout(r, 1200));
       return {
-        success: true,
-        merchant: 'Artisan Cafe & Grill',
+        id: `receipt_${Date.now()}`,
+        original_filename: 'demo-receipt.jpg',
+        merchant_name: 'Artisan Cafe & Grill',
         date: new Date().toISOString().split('T')[0],
         invoiceNumber: `INV-${Math.floor(100000 + Math.random() * 900000)}`,
         currency: 'USD',
@@ -188,12 +191,13 @@ class ApiClient {
         tip: 12.00,
         subtotal: 78.50,
         total: 97.70,
+        extraction_status: 'completed',
         confidence: 0.97,
         items: [
-          { id: 'ext_1', name: 'Signature Truffle Burger', quantity: 2, price: 38.00 },
-          { id: 'ext_2', name: 'Sweet Potato Truffle Fries', quantity: 1, price: 11.50 },
-          { id: 'ext_3', name: 'Artisan Lemonade', quantity: 2, price: 14.00 },
-          { id: 'ext_4', name: 'Chocolate Molten Cake', quantity: 1, price: 15.00 },
+          { id: 'ext_1', item_name: 'Signature Truffle Burger', quantity: 2, total_price: 38.00 },
+          { id: 'ext_2', item_name: 'Sweet Potato Truffle Fries', quantity: 1, total_price: 11.50 },
+          { id: 'ext_3', item_name: 'Artisan Lemonade', quantity: 2, total_price: 14.00 },
+          { id: 'ext_4', item_name: 'Chocolate Molten Cake', quantity: 1, total_price: 15.00 },
         ]
       };
     }

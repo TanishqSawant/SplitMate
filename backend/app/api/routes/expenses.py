@@ -16,6 +16,7 @@ from app.models.models import (
     PaymentStatus,
     Receipt,
     ReceiptItem,
+    ExtractionStatus,
 )
 from app.schemas.schemas import (
     AssignmentBatchRequest,
@@ -26,7 +27,7 @@ from app.schemas.schemas import (
     PaymentResponse,
     SplitsResponse,
 )
-from app.services.split_calculator import calculate_splits_for_expense
+from app.services.split_calculator import calculate_splits_for_expense, is_expense_fully_assigned
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
 
@@ -43,11 +44,34 @@ def create_expense(body: ExpenseCreate, db: Session = Depends(get_db)):
     if not group:
         raise HTTPException(status_code=404, detail="Group not found.")
 
-    # Validate receipt if provided
+    # Fix 1: Validate receipt if provided
     if body.receipt_id:
         receipt = db.get(Receipt, body.receipt_id)
         if not receipt:
             raise HTTPException(status_code=404, detail="Receipt not found.")
+
+        # Receipt extraction must be complete before an expense can be created
+        if receipt.extraction_status != ExtractionStatus.COMPLETED:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Receipt extraction has not completed yet. "
+                    "Wait for AI extraction to finish before creating an expense."
+                ),
+            )
+
+        # If the receipt has an extracted total, the submitted amount must match exactly
+        if receipt.total is not None:
+            submitted = Decimal(str(body.total_amount))
+            extracted = Decimal(str(receipt.total))
+            if submitted != extracted:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Expense total ({submitted}) does not match the extracted receipt total "
+                        f"({extracted}). Use the extracted total or correct the receipt first."
+                    ),
+                )
 
     expense = Expense(
         group_id=body.group_id,
@@ -214,6 +238,18 @@ def initialize_payments(expense_id: uuid.UUID, db: Session = Depends(get_db)):
     expense = db.get(Expense, expense_id)
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found.")
+
+    # Fix 4: Block payment initialization if any receipt items are unassigned / partially assigned
+    if expense.receipt_id:
+        fully_assigned, unassigned_details = is_expense_fully_assigned(expense)
+        if not fully_assigned:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot initialize payments: some receipt items have not been fully assigned. "
+                    + unassigned_details
+                ),
+            )
 
     # Check existing payments for payment safety
     existing_payments = (

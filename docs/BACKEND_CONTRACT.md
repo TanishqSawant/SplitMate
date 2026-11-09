@@ -69,6 +69,30 @@ Submit the extracted structured data via HTTP POST:
 **Endpoint:** `POST /api/receipts/{receipt_id}/extraction`  
 **Content-Type:** `application/json`
 
+> [!IMPORTANT]
+> **Authentication required (Fix 3 — Security):** This endpoint now requires a shared internal service secret.  
+> You must include the following HTTP header in every request:
+> ```
+> X-Internal-Service-Key: <value of INTERNAL_SERVICE_SECRET>
+> ```
+> - The secret value is configured in the backend `.env` file under the key `INTERNAL_SERVICE_SECRET`.
+> - Tanishq will share the actual secret value with you directly (never commit it to Git).
+> - Requests missing this header receive **HTTP 401**. Requests with an incorrect value receive **HTTP 403**.
+>
+> **Python example using `requests`:**
+> ```python
+> import os, requests
+>
+> BACKEND_URL = os.getenv("SPLITMATE_BACKEND_URL", "http://localhost:8000")
+> INTERNAL_KEY = os.getenv("INTERNAL_SERVICE_SECRET")  # load from your own .env
+>
+> response = requests.post(
+>     f"{BACKEND_URL}/api/receipts/{receipt_id}/extraction",
+>     headers={"X-Internal-Service-Key": INTERNAL_KEY},
+>     json=extraction_payload,
+> )
+> ```
+
 #### Request Payload Specification:
 ```json
 {
@@ -118,6 +142,8 @@ Submit the extracted structured data via HTTP POST:
 Returns the complete `ReceiptResponse` with `extraction_status: "completed"` and all stored `ReceiptItem` IDs populated.
 
 #### Error Handling:
+- `401 Unauthorized`: Missing `X-Internal-Service-Key` header.
+- `403 Forbidden`: Incorrect `X-Internal-Service-Key` value.
 - `404 Not Found`: If `receipt_id` does not exist.
 - `409 Conflict`: If extraction results have already been submitted for this receipt.
 - `422 Unprocessable Entity`: Validation failure (e.g. missing fields or invalid format).
