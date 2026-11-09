@@ -384,3 +384,4 @@ class PayPalService:
 
 # Module-level default singleton instance
 paypal_service = PayPalService()
+
