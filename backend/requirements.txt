@@ -12,6 +12,10 @@ pydantic[email]==2.10.2
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
 
+# Authentication & Security
+bcrypt==5.0.0
+pyjwt==2.15.1
+
 # File uploads
 python-multipart==0.0.17
 
@@ -21,3 +25,8 @@ pytest-asyncio==0.24.0
 httpx==0.28.0
 
 # CORS is built into FastAPI/Starlette
+
+# Receipt processing
+pypdfium2==5.15.1
+Pillow==13.0.0
+numpy==2.5.4

@@ -5,13 +5,15 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.models import Payment, PaymentStatus
+from app.models.models import Payment, PaymentStatus, User
 from app.schemas.schemas import (
     PaymentCaptureRequest,
     PaymentCreateOrderRequest,
     PaymentResponse,
 )
+from app.services.authorization import require_payment_access
 
 router = APIRouter(prefix="/api/payments", tags=["Payments"])
 
@@ -25,10 +27,9 @@ def create_paypal_order(
     payment_id: uuid.UUID,
     body: PaymentCreateOrderRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    payment = db.get(Payment, payment_id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found.")
+    payment = require_payment_access(db, payment_id, current_user, require_payer=True)
 
     if payment.status != PaymentStatus.PENDING:
         raise HTTPException(
@@ -68,10 +69,9 @@ def capture_payment(
     payment_id: uuid.UUID,
     body: PaymentCaptureRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    payment = db.get(Payment, payment_id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found.")
+    payment = require_payment_access(db, payment_id, current_user, require_payer=True)
 
     if payment.status == PaymentStatus.CAPTURED:
         raise HTTPException(status_code=409, detail="Payment already captured.")
@@ -112,9 +112,11 @@ def capture_payment(
     response_model=PaymentResponse,
     summary="Get payment status",
 )
-def get_payment(payment_id: uuid.UUID, db: Session = Depends(get_db)):
-    payment = db.get(Payment, payment_id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found.")
+def get_payment(
+    payment_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    payment = require_payment_access(db, payment_id, current_user, require_payer=False)
     return payment
 

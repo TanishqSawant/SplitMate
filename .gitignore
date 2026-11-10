@@ -227,3 +227,12 @@ backend/uploads/
 node_modules/
 dist/
 .DS_Store
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor swap files
+*.swp
+*.swo
