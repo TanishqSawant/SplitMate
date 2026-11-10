@@ -7,9 +7,7 @@ import {
   Receipt,
   PieChart,
   Settings,
-  HelpCircle,
-  Shield,
-  ArrowUpRight
+  Shield
 } from 'lucide-react';
 import Badge from './Badge';
 
@@ -25,7 +23,7 @@ export default function Sidebar({ currentView, onNavigate, isOpen, onClose }) {
       id: 'receipt-scan',
       label: 'AI Receipt Scanner',
       icon: ScanLine,
-      badge: 'Pawan AI',
+      badge: 'Smart OCR',
       badgeVariant: 'purple',
     },
     {
@@ -55,7 +53,7 @@ export default function Sidebar({ currentView, onNavigate, isOpen, onClose }) {
     },
     {
       id: 'settings',
-      label: 'Settings & API Health',
+      label: 'Account & Settings',
       icon: Settings,
       badge: null,
     },
@@ -120,20 +118,20 @@ export default function Sidebar({ currentView, onNavigate, isOpen, onClose }) {
             })}
           </nav>
 
-          {/* PayPal Hackathon Project Card */}
+          {/* SplitMate Security & Brand Card */}
           <div className="mx-1 p-3.5 rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50/50 dark:from-slate-800/80 dark:to-blue-950/30 border border-blue-100 dark:border-blue-900/50">
             <div className="flex items-center justify-between mb-2">
               <span className="text-[11px] font-bold uppercase tracking-wider text-[#0070BA] dark:text-blue-400">
-                PayPal AI Hackathon
+                SplitMate Intelligent
               </span>
               <Shield className="w-3.5 h-3.5 text-[#0070BA] dark:text-blue-400" />
             </div>
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-normal">
-              Built with FastAPI, Computer Vision OCR, and PayPal Sandbox Checkout.
+              AI-powered bill scanning and instant peer-to-peer PayPal settlements.
             </p>
             <div className="mt-3 pt-2.5 border-t border-blue-200/50 dark:border-blue-800/40 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
-              <span>Deadline: Nov 13</span>
-              <span className="font-semibold text-emerald-600 dark:text-emerald-400">Phase 1 Complete</span>
+              <span>Sandbox Verified</span>
+              <span className="font-semibold text-emerald-600 dark:text-emerald-400">Bank-Grade 256-Bit</span>
             </div>
           </div>
         </div>

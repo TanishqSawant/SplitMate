@@ -24,13 +24,18 @@ export function ExpenseProvider({ children }) {
 
   // Active receipt scan session
   const [receiptScan, setReceiptScan] = useState({
-    status: 'idle', // 'idle' | 'uploading' | 'processing' | 'review' | 'error'
+    status: 'idle', // 'idle' | 'uploading' | 'processing' | 'pending' | 'review' | 'error'
+    // 'pending' = file uploaded to backend, waiting for Pawan's AI service to POST results (polling timed out)
     file: null,
     previewUrl: null,
     progress: 0,
+    stage: '',
     extractedData: null,
     confidence: null,
     error: null,
+    warnings: [],
+    editedFields: {},
+    receiptId: null, // UUID returned by POST /api/receipts/upload
   });
 
   // Active PayPal settlement modal state
@@ -165,88 +170,313 @@ export function ExpenseProvider({ children }) {
     }
   };
 
-  // Start Receipt Extraction (Pawan's AI OCR)
+  // Reset Receipt Scanner to clean state
+  const resetReceiptScan = () => {
+    if (receiptScan.previewUrl && receiptScan.previewUrl.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(receiptScan.previewUrl);
+      } catch {
+        // ignore revoke error
+      }
+    }
+    setReceiptScan({
+      status: 'idle',
+      file: null,
+      previewUrl: null,
+      progress: 0,
+      stage: '',
+      extractedData: null,
+      confidence: null,
+      error: null,
+      warnings: [],
+      editedFields: {},
+      receiptId: null,
+    });
+  };
+
+  // Start Receipt Extraction using the real backend contract:
+  //   Step 1: POST /api/receipts/upload  → returns {id, extraction_status: 'PENDING', ...}
+  //   Step 2: Poll GET /api/receipts/{id} until extraction_status === 'COMPLETED'
+  //            (Pawan's AI service calls POST /api/receipts/{id}/extraction when done)
+  //   Step 3: Map completed ReceiptResponse into extractedData state
   const processReceiptFile = async (file) => {
+    // 1. Prevent duplicate concurrent submissions
+    if (receiptScan.status === 'uploading' || receiptScan.status === 'processing') {
+      return;
+    }
+
+    // 2. Validate file existence and format
+    if (!file) return;
+
+    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
+    const fileName = file.name || '';
+    const fileExt = fileName.substring(fileName.lastIndexOf('.')).toLowerCase();
+    const isAllowedExt = allowedExtensions.includes(fileExt);
+    const isAllowedMime = file.type?.startsWith('image/') || file.type === 'application/pdf';
+
+    if (!isAllowedExt && !isAllowedMime) {
+      setReceiptScan({
+        status: 'error',
+        file: null,
+        previewUrl: null,
+        progress: 0,
+        stage: '',
+        extractedData: null,
+        confidence: null,
+        error: "File format not supported. Please upload a JPG, JPEG, PNG, WEBP, or PDF receipt.",
+        warnings: [],
+        editedFields: {},
+      });
+      return;
+    }
+
+    // 3. Validate size bound (10 MB maximum, matching backend config)
+    const MAX_SIZE_BYTES = 10 * 1024 * 1024;
+    if (file.size > MAX_SIZE_BYTES) {
+      setReceiptScan({
+        status: 'error',
+        file: null,
+        previewUrl: null,
+        progress: 0,
+        stage: '',
+        extractedData: null,
+        confidence: null,
+        error: `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 10 MB limit. Please upload a smaller image.`,
+        warnings: [],
+        editedFields: {},
+      });
+      return;
+    }
+
+    // 4. Clean previous session and allocate object URL
+    if (receiptScan.previewUrl && receiptScan.previewUrl.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(receiptScan.previewUrl);
+      } catch {
+        // ignore revoke error
+      }
+    }
     const previewUrl = URL.createObjectURL(file);
+
+    // --- STEP 1: Upload ---
     setReceiptScan({
       status: 'uploading',
       file,
       previewUrl,
-      progress: 25,
+      progress: 15,
+      stage: 'Uploading receipt to server...',
       extractedData: null,
       confidence: null,
       error: null,
+      warnings: [],
+      editedFields: {},
     });
 
     try {
-      // Step 1: Uploading
-      await new Promise((r) => setTimeout(r, 600));
-      setReceiptScan((prev) => ({ ...prev, status: 'processing', progress: 65 }));
-
-      // Step 2: Request extraction from Pawan's endpoint
+      // Build strictly compliant FormData — do NOT set Content-Type manually
       const formData = new FormData();
-      // FastAPI's upload_receipt endpoint expects the multipart field name 'file'.
       formData.append('file', file);
 
-      const uploadedReceipt = await apiClient.request(API_ENDPOINTS.RECEIPTS.UPLOAD, {
+      // POST /api/receipts/upload returns {id, extraction_status: 'PENDING', ...}
+      const uploadResponse = await apiClient.request(API_ENDPOINTS.RECEIPTS.UPLOAD, {
         method: 'POST',
         body: formData,
         isFormData: true,
+        timeout: 15000, // 15s for file upload
       });
 
-      setReceiptScan((prev) => ({ ...prev, progress: 100 }));
-      await new Promise((r) => setTimeout(r, 400));
+      if (!uploadResponse || !uploadResponse.id) {
+        throw new Error("Receipt upload failed. The server did not return a receipt ID.");
+      }
 
-      // The current backend upload endpoint stores the receipt but does not run OCR.
-      // It returns extraction_status='pending' until the AI service submits results.
-      if (!uploadedReceipt.items || uploadedReceipt.items.length === 0) {
+      const receiptId = uploadResponse.id;
+
+      // --- STEP 2: Poll for extraction completion ---
+      setReceiptScan((prev) => ({
+        ...prev,
+        status: 'processing',
+        progress: 35,
+        stage: 'Analyzing your receipt...',
+      }));
+
+      const POLL_INTERVAL_MS = 2000;
+      const MAX_POLL_ATTEMPTS = 30; // 30 × 2s = 60s max wait
+      const STAGE_LABELS = [
+        { threshold: 40, label: 'Analyzing your receipt...' },
+        { threshold: 55, label: 'Extracting merchant details...' },
+        { threshold: 70, label: 'Identifying individual items...' },
+        { threshold: 85, label: 'Calculating taxes and totals...' },
+        { threshold: 95, label: 'Finalizing extraction results...' },
+      ];
+
+      let pollAttempt = 0;
+      let receiptData = null;
+
+      while (pollAttempt < MAX_POLL_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        pollAttempt++;
+
+        // Calculate smooth progress: 35% → 95% across max attempts
+        const rawProgress = 35 + Math.round((pollAttempt / MAX_POLL_ATTEMPTS) * 60);
+        const cappedProgress = Math.min(rawProgress, 95);
+        const stageLabel = STAGE_LABELS.findLast?.((s) => cappedProgress >= s.threshold)?.label
+          ?? STAGE_LABELS[Math.min(pollAttempt - 1, STAGE_LABELS.length - 1)].label;
+
         setReceiptScan((prev) => ({
           ...prev,
-          status: 'error',
-          receiptId: uploadedReceipt.id,
-          error: 'Receipt uploaded successfully, but AI extraction is not connected to the backend yet.',
+          progress: cappedProgress,
+          stage: stageLabel,
+        }));
+
+        // GET /api/receipts/{id}
+        let pollData;
+        try {
+          pollData = await apiClient.request(API_ENDPOINTS.RECEIPTS.GET(receiptId), {
+            method: 'GET',
+            timeout: 8000,
+          });
+        } catch {
+          // Network error during poll — propagate
+          throw new Error(`Unable to connect to the receipt extraction service.`);
+        }
+
+        if (pollData.extraction_status === 'COMPLETED') {
+          receiptData = pollData;
+          break;
+        }
+
+        if (pollData.extraction_status === 'FAILED') {
+          throw new Error("Receipt extraction failed. Please try again.");
+        }
+
+        // Still PENDING — continue polling
+      }
+
+      if (!receiptData) {
+        // Timed out — AI service may still be processing
+        setReceiptScan((prev) => ({
+          ...prev,
+          status: 'pending',
+          progress: 95,
+          stage: 'AI extraction is still processing...',
+          receiptId,
         }));
         return;
       }
 
-      const extraction = {
-        merchant: uploadedReceipt.merchant_name,
-        currency: uploadedReceipt.currency,
-        subtotal: uploadedReceipt.subtotal,
-        tax: uploadedReceipt.tax,
-        total: uploadedReceipt.total,
-        items: uploadedReceipt.items.map((item) => ({
-          id: item.id,
-          name: item.item_name,
-          quantity: item.quantity,
-          price: item.total_price,
-        })),
-      };
+      // --- STEP 3: Map ReceiptResponse into frontend extractedData ---
+      // Backend ReceiptResponse: { id, merchant_name, currency, subtotal, tax, total, extraction_status, items[] }
+      // items[]: { id, receipt_id, item_name, quantity, unit_price, total_price }
 
-      // Items default assignment: assign each to all members of activeGroup or currentUser
-      const defaultMembers = activeGroup?.members?.map((m) => m.userId) || [currentUser.id];
-      const itemsWithAssignments = (extraction.items || []).map((item) => ({
-        ...item,
-        assignedTo: item.assignedTo || [...defaultMembers],
+      const rawItems = Array.isArray(receiptData.items) ? receiptData.items : [];
+      const formattedItems = rawItems.map((item, idx) => ({
+        id: item.id || `item_${idx + 1}`,
+        name: item.item_name || 'Unnamed Item',
+        quantity: item.quantity != null ? Number(item.quantity) : 1,
+        price: Number(item.total_price ?? item.unit_price ?? 0),
+        unitPrice: item.unit_price != null ? Number(item.unit_price) : null,
       }));
+
+      const merchant = receiptData.merchant_name || null;
+      const totalAmount = receiptData.total != null ? Number(receiptData.total) : null;
+      const subtotalVal = receiptData.subtotal != null ? Number(receiptData.subtotal) : null;
+      const taxVal = receiptData.tax != null ? Number(receiptData.tax) : null;
+
+      // Assign items to active group members
+      const defaultMembers = activeGroup?.members?.map((m) => m.userId) || [currentUser?.id].filter(Boolean);
+      const itemsWithAssignments = formattedItems.map((item) => ({
+        ...item,
+        assignedTo: [...defaultMembers],
+      }));
+
+      // Compute finalTotal: use backend total, or derive from subtotal+tax
+      const computedTotal = (subtotalVal || 0) + (taxVal || 0);
+      const finalTotal = totalAmount != null && totalAmount > 0 ? totalAmount : computedTotal;
+
+      // Math consistency warning
+      const warnings = [];
+      if (subtotalVal !== null && taxVal !== null && totalAmount !== null) {
+        const expectedTotal = Number((subtotalVal + taxVal).toFixed(2));
+        if (Math.abs(totalAmount - expectedTotal) > 0.05) {
+          warnings.push(`Mathematical discrepancy: Subtotal ($${subtotalVal.toFixed(2)}) + Tax ($${taxVal.toFixed(2)}) = $${expectedTotal.toFixed(2)}, but receipt total is $${totalAmount.toFixed(2)}. Please verify.`);
+        }
+      }
 
       setReceiptScan({
         status: 'review',
         file,
         previewUrl,
         progress: 100,
+        stage: 'Extraction complete',
+        receiptId,
         extractedData: {
-          ...extraction,
+          merchant,
+          date: null,
+          category: 'General',
+          currency: receiptData.currency || 'USD',
+          subtotal: subtotalVal,
+          tax: taxVal,
+          tip: null,
+          total: finalTotal,
           items: itemsWithAssignments,
         },
-        confidence: extraction.confidence || 0.95,
+        // Confidence not included in ReceiptResponse — Pawan's service tracks it internally
+        confidence: null,
+        warnings,
+        editedFields: {},
         error: null,
       });
+
     } catch (err) {
+      const msg = err.message || '';
+      let userFriendlyError = "Receipt extraction failed. Please try again.";
+
+      if (
+        msg.toLowerCase().includes('unable to connect') ||
+        msg.toLowerCase().includes('unreachable') ||
+        msg.toLowerCase().includes('failed to fetch') ||
+        msg.toLowerCase().includes('network') ||
+        msg.toLowerCase().includes('econnrefused')
+      ) {
+        userFriendlyError = "Unable to connect to the receipt extraction service.";
+      } else if (
+        msg.toLowerCase().includes('not appear to contain') ||
+        msg.toLowerCase().includes('not a receipt') ||
+        msg.toLowerCase().includes('invalid image') ||
+        msg.toLowerCase().includes('400')
+      ) {
+        userFriendlyError = "This image does not appear to contain a valid receipt.";
+      } else if (
+        msg.toLowerCase().includes('blur') ||
+        msg.toLowerCase().includes('quality')
+      ) {
+        userFriendlyError = "We couldn't read this receipt clearly. Please upload a higher-quality image.";
+      } else if (
+        msg.toLowerCase().includes('413') ||
+        msg.toLowerCase().includes('too large')
+      ) {
+        userFriendlyError = "The file is too large. Please upload an image under 10 MB.";
+      } else if (
+        msg.toLowerCase().includes('422') ||
+        msg.toLowerCase().includes('unprocessable')
+      ) {
+        userFriendlyError = "The file could not be processed by the server. Please check the format and try again.";
+      } else if (
+        msg.toLowerCase().includes('500') ||
+        msg.toLowerCase().includes('internal server') ||
+        msg.toLowerCase().includes('json') ||
+        msg.toLowerCase().includes('syntaxerror')
+      ) {
+        userFriendlyError = "Receipt extraction failed. Please try again.";
+      } else if (msg) {
+        userFriendlyError = msg;
+      }
+
       setReceiptScan((prev) => ({
         ...prev,
         status: 'error',
-        error: err.message || 'AI extraction failed. Please try a clearer receipt image.',
+        error: userFriendlyError,
+        extractedData: null,
       }));
     }
   };
@@ -259,6 +489,7 @@ export function ExpenseProvider({ children }) {
       file: null,
       previewUrl: sample.image,
       progress: 100,
+      stage: 'Loaded demo benchmark sample',
       extractedData: {
         merchant: sample.merchant,
         date: sample.date,
@@ -272,6 +503,8 @@ export function ExpenseProvider({ children }) {
         items: JSON.parse(JSON.stringify(sample.items)),
       },
       confidence: sample.confidence,
+      warnings: [],
+      editedFields: {},
       error: null,
     });
   };
@@ -296,6 +529,39 @@ export function ExpenseProvider({ children }) {
     });
   };
 
+  // Update item line details (quantity, price, name)
+  const updateExtractedItem = (itemId, updates) => {
+    setReceiptScan((prev) => {
+      if (!prev.extractedData) return prev;
+      const updatedItems = prev.extractedData.items.map((item) => {
+        if (item.id === itemId) {
+          return { ...item, ...updates, isEdited: true };
+        }
+        return item;
+      });
+      const newSubtotal = Number(updatedItems.reduce((sum, it) => sum + (it.price || 0), 0).toFixed(2));
+      const tax = prev.extractedData.tax || 0;
+      const tip = prev.extractedData.tip || 0;
+      const newTotal = Number((newSubtotal + tax + tip).toFixed(2));
+
+      return {
+        ...prev,
+        extractedData: {
+          ...prev.extractedData,
+          items: updatedItems,
+          subtotal: newSubtotal,
+          total: newTotal,
+        },
+        editedFields: {
+          ...prev.editedFields,
+          items: true,
+          subtotal: true,
+          total: true,
+        },
+      };
+    });
+  };
+
   // Update receipt line items or metadata
   const updateReceiptMetadata = (field, value) => {
     setReceiptScan((prev) => {
@@ -305,6 +571,10 @@ export function ExpenseProvider({ children }) {
         extractedData: {
           ...prev.extractedData,
           [field]: value,
+        },
+        editedFields: {
+          ...prev.editedFields,
+          [field]: true,
         },
       };
     });
@@ -404,7 +674,10 @@ export function ExpenseProvider({ children }) {
 
   // Execute PayPal Payment Flow (Tanay's integration)
   const executePayPalPayment = async () => {
-    setPayPalModal((prev) => ({ ...prev, status: 'initiating' }));
+    // Prevent duplicate simultaneous submissions
+    if (payPalModal.status !== 'idle' && payPalModal.status !== 'error') return;
+
+    setPayPalModal((prev) => ({ ...prev, status: 'initiating', error: null }));
 
     try {
       // Step 1: Create Order
@@ -516,6 +789,8 @@ export function ExpenseProvider({ children }) {
         loadSampleReceipt,
         updateItemAssignment,
         updateReceiptMetadata,
+        updateExtractedItem,
+        resetReceiptScan,
         finalizeReceiptScan,
         openPayPalPayment,
         closePayPalModal,

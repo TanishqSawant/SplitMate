@@ -1,27 +1,24 @@
 import React, { useState } from 'react';
 import {
   CreditCard,
-  ShieldCheck,
   CheckCircle2,
   AlertCircle,
   Lock,
-  ArrowRight,
-  ExternalLink,
   Copy,
   Check
 } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import Modal from '../common/Modal';
 import Button from '../common/Button';
-import Badge from '../common/Badge';
 
 export default function PayPalPaymentModal() {
   const { payPalModal, closePayPalModal, executePayPalPayment } = useExpenses();
   const [copied, setCopied] = useState(false);
+  const [captureTime] = useState(() => new Date().toLocaleTimeString());
 
   if (!payPalModal.isOpen) return null;
 
-  const { payer, receiver, amount, currency, note, status, transactionId, error } = payPalModal;
+  const { _payer, receiver, amount, currency, note, status, transactionId, error } = payPalModal;
 
   const handleCopyId = () => {
     if (transactionId) {
@@ -103,14 +100,15 @@ export default function PayPalPaymentModal() {
             {/* Yellow PayPal Branded Button */}
             <button
               onClick={executePayPalPayment}
-              className="w-full py-3.5 px-6 rounded-2xl bg-[#FFC439] hover:bg-[#F2BA36] text-[#003087] font-black text-base shadow-md hover:shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
+              disabled={status !== 'idle'}
+              className="w-full py-3.5 px-6 rounded-2xl bg-[#FFC439] hover:bg-[#F2BA36] disabled:opacity-50 disabled:cursor-not-allowed text-[#003087] font-black text-base shadow-md hover:shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
             >
               <span>Pay with</span>
               <span className="italic font-extrabold text-lg tracking-tight">PayPal</span>
             </button>
 
             <p className="text-[11px] text-center text-slate-400">
-              Payments are routed via Tanay's FastAPI Sandbox integration endpoints.
+              Payments are securely processed via PayPal Sandbox with encrypted transfer tokens.
             </p>
           </div>
         )}
@@ -169,7 +167,7 @@ export default function PayPalPaymentModal() {
               </div>
               <div className="flex justify-between">
                 <span>Timestamp:</span>
-                <span>{new Date().toLocaleTimeString()}</span>
+                <span>{captureTime}</span>
               </div>
               <div className="flex justify-between">
                 <span>Status:</span>

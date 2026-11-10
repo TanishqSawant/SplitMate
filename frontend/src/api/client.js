@@ -5,14 +5,14 @@
  * and resilient mock fallback for hackathon presentations.
  */
 
-import { API_ENDPOINTS } from './endpoints';
+import { API_ENDPOINTS } from './endpoints.js';
 import {
   MOCK_USERS,
   MOCK_GROUPS,
   MOCK_EXPENSES
-} from './mockData';
+} from './mockData.js';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+const BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || 'http://localhost:8000/api';
 const DEFAULT_TIMEOUT_MS = 6000;
 
 class ApiClient {
@@ -103,10 +103,19 @@ class ApiClient {
       return await response.json();
     } catch (err) {
       clearTimeout(timeoutId);
-      // If server is unreachable or offline, mark backend offline and provide mock response
-      if (err.name === 'AbortError' || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+      // If server is unreachable, timed out, or offline, mark backend offline and provide mock response
+      const isNetworkError =
+        err.name === 'AbortError' ||
+        err.name === 'TypeError' ||
+        err.message?.toLowerCase().includes('failed to fetch') ||
+        err.message?.toLowerCase().includes('fetch failed') ||
+        err.message?.toLowerCase().includes('networkerror') ||
+        err.message?.toLowerCase().includes('connection refused') ||
+        Boolean(err.cause);
+
+      if (isNetworkError) {
         this.notifyStatus(false);
-        console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to resilient mock service.`, err);
+        console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to resilient mock service.`);
         return this.handleMockFallback(endpoint, options);
       }
       throw err;
@@ -176,30 +185,20 @@ class ApiClient {
       }
     }
 
-    // 5. AI Receipt Extraction (Pawan's contract)
+    // 5. AI Receipt Extraction (Never fabricate fake OCR results)
+    // The frontend calls POST /receipts/upload then polls GET /receipts/{id}.
+    // If the backend is unreachable during upload or poll, throw — do NOT return mock receipt data.
     if (endpoint === API_ENDPOINTS.RECEIPTS.UPLOAD) {
-      // Simulate Pawan's AI vision extraction response
-      await new Promise((r) => setTimeout(r, 1200));
-      return {
-        id: `receipt_${Date.now()}`,
-        original_filename: 'demo-receipt.jpg',
-        merchant_name: 'Artisan Cafe & Grill',
-        date: new Date().toISOString().split('T')[0],
-        invoiceNumber: `INV-${Math.floor(100000 + Math.random() * 900000)}`,
-        currency: 'USD',
-        tax: 7.20,
-        tip: 12.00,
-        subtotal: 78.50,
-        total: 97.70,
-        extraction_status: 'completed',
-        confidence: 0.97,
-        items: [
-          { id: 'ext_1', item_name: 'Signature Truffle Burger', quantity: 2, total_price: 38.00 },
-          { id: 'ext_2', item_name: 'Sweet Potato Truffle Fries', quantity: 1, total_price: 11.50 },
-          { id: 'ext_3', item_name: 'Artisan Lemonade', quantity: 2, total_price: 14.00 },
-          { id: 'ext_4', item_name: 'Chocolate Molten Cake', quantity: 1, total_price: 15.00 },
-        ]
-      };
+      // Per hackathon safety rules: Never invent receipt details or return unrelated demo data for user uploads.
+      throw new Error(
+        'Unable to connect to the receipt extraction service. Please ensure the backend server is running on http://localhost:8000.'
+      );
+    }
+    // Also block polling fallback
+    if (typeof endpoint === 'string' && endpoint.startsWith('/receipts/')) {
+      throw new Error(
+        'Unable to connect to the receipt extraction service. Please ensure the backend server is running on http://localhost:8000.'
+      );
     }
 
     // 6. PayPal Create Order (Tanay's contract)

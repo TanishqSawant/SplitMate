@@ -9,7 +9,7 @@ export default function GroupsView({
   onScanReceipt,
   onSelectExpense,
 }) {
-  const { activeGroup, setActiveGroup } = useExpenses();
+  const { setActiveGroup } = useExpenses();
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isAddExpenseOpen, setIsAddExpenseOpen] = useState(false);
 
