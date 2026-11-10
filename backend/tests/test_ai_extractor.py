@@ -245,54 +245,28 @@ def test_tesseract_availability_check():
 
 
 # =============================================================================
-# 5. LLM PARSER & EXPLICIT FALLBACK ENGINE
+# 5. CURRENCY DETECTION & NO-FALLBACK GUARANTEES
 # =============================================================================
 
-def test_explicit_fallback_marks_degraded_status():
-    """Fallback engine must NEVER claim fallback is AI.
-    
-    Must set is_fallback=True, method='regex_heuristic_fallback', confidence <= 0.35,
-    and include explicit fallback warning.
-    """
-    raw_text = """
-    Mario's Italian Bistro
-    123 Little Italy Way
-    Date: 2026-11-06
-    Invoice #: REC-2026-9481
-    Margherita Pizza 1 18.00
-    Fettuccine Alfredo 2 28.00
-    Subtotal: $46.00
-    Tax: $4.14
-    TOTAL AMOUNT: $50.14
-    """
-    fallback = RegexHeuristicFallback()
-    result = fallback.parse_text(raw_text)
-
-    # Strict fallback assertions:
-    assert result.is_fallback is True
-    assert result.extraction_method == "regex_heuristic_fallback"
-    assert result.confidence <= 0.35
-    assert any("Fallback extraction used" in w for w in result.warnings)
-
-    # Data extraction assertions:
-    assert result.merchant_name == "Mario's Italian Bistro"
-    assert result.receipt_date == "2026-11-06"
-    assert result.receipt_number == "REC-2026-9481"
-    assert result.subtotal == Decimal("46.00")
-    assert result.tax == Decimal("4.14")
-    assert result.final_total == Decimal("50.14")
-    assert len(result.items) >= 2
-
-
-def test_fallback_with_empty_text():
-    """Empty text must yield null fields and confidence 0.0 with clear diagnostics."""
-    fallback = RegexHeuristicFallback()
-    result = fallback.parse_text("")
-    assert result.is_fallback is True
-    assert result.confidence == 0.0
-    assert result.merchant_name is None
-    assert result.final_total is None
-    assert any("No text could be extracted" in w for w in result.warnings)
+def test_ocr_preprocessing_does_not_replace_gemini():
+    """Requirement: Local OCR/embedded text must strictly serve as preprocessing context, never replace Gemini."""
+    service = ReceiptExtractionService()  # Unconfigured API key
+    img = Image.new("RGB", (100, 100), color="white")
+    embedded_sample_text = (
+        "Cafe Bistro\nCoffee 1 4.50\nSubtotal: 4.50\nTax: 0.45\nTotal: 4.95"
+    )
+    res = service.ocr_engine.process_receipt(
+        image=img,
+        embedded_text=embedded_sample_text,
+    )
+    # Gemini failure/absence must return status failed with API_KEY_MISSING, never OCR/regex data
+    assert res.status == "failed"
+    assert res.error_code == "API_KEY_MISSING"
+    assert res.confidence == 0.0
+    assert res.items == []
+    assert res.merchant_name is None
+    assert res.final_total is None
+    assert res.is_fallback is False
 
 
 def test_currency_detection_inr_formats():
@@ -319,19 +293,59 @@ def test_currency_missing_preserves_null_in_canonical_result():
     assert any("Currency was not detected on receipt" in w for w in result.warnings)
 
 
-def test_backend_adapter_defaults_to_usd_with_explicit_warning():
-    """Backend contract requires a 3-letter currency code; adapter defaults to USD with warning."""
+def test_missing_currency_preserves_none_in_all_adapters():
+    """Requirement: If currency is not identified, preserve currency=None in all adapters without defaulting to USD."""
     result = ReceiptExtractionResult(
+        is_receipt=True,
         merchant_name="Unknown Diner",
         currency=None,  # Genuinely missing
         subtotal=Decimal("10.00"),
         tax=Decimal("1.00"),
         final_total=Decimal("11.00"),
+        items=[
+            ExtractedLineItem(
+                item_name="Coffee",
+                quantity=1,
+                unit_price=Decimal("10.00"),
+                total_price=Decimal("10.00"),
+            ),
+        ],
+    )
+    # Backend contract adapter must preserve None (never default to USD)
+    backend_payload = result.to_backend_contract()
+    assert backend_payload["currency"] is None
+    assert not any("defaulted to USD" in w for w in result.warnings)
+
+    # Frontend contract adapter must preserve None
+    frontend_payload = result.to_frontend_contract()
+    assert frontend_payload["currency"] is None
+
+    # Full API response contract adapter must preserve None
+    api_payload = result.to_api_response()
+    assert api_payload["currency"] is None
+
+
+def test_backend_adapter_rejects_empty_items_without_dummy_fabrication():
+    """Backend adapter MUST NOT fabricate dummy 'Receipt Total' items."""
+    result = ReceiptExtractionResult(
+        is_receipt=True,
+        merchant_name="Mario's",
+        currency="USD",
         items=[],
     )
-    payload = result.to_backend_contract()
-    assert payload["currency"] == "USD"
-    assert any("defaulted to USD for backend schema compliance" in w for w in result.warnings)
+    with pytest.raises(ValueError, match="No line items"):
+        result.to_backend_contract()
+
+
+def test_backend_adapter_rejects_non_receipt():
+    """Backend adapter MUST refuse to generate payload for non-receipts."""
+    result = ReceiptExtractionResult(
+        is_receipt=False,
+        rejection_reason="Document is an academic conversion table.",
+        items=[],
+    )
+    with pytest.raises(ValueError, match="non-receipt"):
+        result.to_backend_contract()
 
 
 # =============================================================================
@@ -340,31 +354,168 @@ def test_backend_adapter_defaults_to_usd_with_explicit_warning():
 
 def test_service_rejects_empty_file():
     service = ReceiptExtractionService()
+    # Contract response test (Section 2: return failed status with error_code and message)
+    res = service.extract_from_bytes(b"", "receipt.jpg")
+    assert res.status == "failed"
+    assert res.error_code == "EMPTY_FILE"
+    assert "empty" in res.error_message.lower()
+
+    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="empty"):
-        service.extract_from_bytes(b"", "receipt.jpg")
+        service.extract_from_bytes(b"", "receipt.jpg", raise_on_error=True)
 
 
 def test_service_rejects_unsupported_format():
     service = ReceiptExtractionService()
+    # Contract response test
+    res = service.extract_from_bytes(b"some content", "malicious_script.exe")
+    assert res.status == "failed"
+    assert res.error_code == "UNSUPPORTED_FORMAT"
+
+    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="not supported"):
-        service.extract_from_bytes(b"some content", "malicious_script.exe")
+        service.extract_from_bytes(b"some content", "malicious_script.exe", raise_on_error=True)
 
 
 def test_service_rejects_oversized_file():
     service = ReceiptExtractionService(max_size_mb=1)  # 1 MB threshold
     large_payload = b"0" * (2 * 1024 * 1024)  # 2 MB
+    # Contract response test
+    res = service.extract_from_bytes(large_payload, "large_receipt.png")
+    assert res.status == "failed"
+    assert res.error_code == "FILE_TOO_LARGE"
+
+    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="exceeds maximum allowed limit"):
-        service.extract_from_bytes(large_payload, "large_receipt.png")
+        service.extract_from_bytes(large_payload, "large_receipt.png", raise_on_error=True)
 
 
 def test_service_rejects_corrupted_image():
     service = ReceiptExtractionService()
+    # Contract response test
+    res = service.extract_from_bytes(b"not a real image payload", "broken.jpg")
+    assert res.status == "failed"
+    assert res.error_code == "CORRUPTED_IMAGE"
+
+    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="Corrupted or invalid image"):
-        service.extract_from_bytes(b"not a real image payload", "broken.jpg")
+        service.extract_from_bytes(b"not a real image payload", "broken.jpg", raise_on_error=True)
+
+
+def test_reject_infix_postfix_table():
+    """CRITICAL FIX: Infix-to-postfix conversion tables must be classified as non-receipts."""
+    table_text = """
+    Infix to Postfix Conversion Table
+    Token   Stack   Postfix Output
+    (       (
+    A       (       A
+    +       (+      A
+    B       (+      AB
+    *       (+*     AB
+    C       (+*     ABC
+    )               ABC*+
+    """
+    fallback = RegexHeuristicFallback()
+    result = fallback.parse_text(table_text)
+
+    # Classification & Rejection assertions:
+    assert result.is_receipt is False
+    assert result.rejection_reason is not None
+    assert any(term in result.rejection_reason.lower() for term in ["academic", "infix", "postfix", "table"])
+    assert result.confidence == 0.0
+    assert result.merchant_name is None
+    assert result.items == []
+    assert result.final_total is None
+
+    # Contract assertions:
+    frontend_data = result.to_frontend_contract()
+    assert frontend_data["success"] is False
+    assert frontend_data["is_receipt"] is False
+    assert frontend_data["merchant"] is None
+    assert frontend_data["items"] == []
+
+    # Backend adapter must reject conversion
+    with pytest.raises(ValueError, match="non-receipt"):
+        result.to_backend_contract()
+
+
+def test_reject_blank_image():
+    """Blank images must be classified as non-receipts with confidence 0.0."""
+    fallback = RegexHeuristicFallback()
+    result = fallback.parse_text("")
+    assert result.is_receipt is False
+    assert result.status == "failed"
+    assert result.error_code == "NO_READABLE_TEXT"
+    assert result.confidence == 0.0
+    assert result.items == []
+
+    # With service.validate_receipt, raises ReceiptExtractionError for non-receipts
+    service = ReceiptExtractionService()
+    with pytest.raises(ReceiptExtractionError, match="No readable text"):
+        service.validate_receipt(result)
+
+
+def test_reject_random_academic_document():
+    """Academic document with abstract, theorem, and pseudocode must be rejected."""
+    academic_text = """
+    Algorithm Complexity Analysis in Distributed Systems
+    Abstract: In this paper we study asynchronous message passing.
+    Lemma 1. The time complexity of algorithm is O(n log n).
+    Proof: By induction on the height of the parse tree.
+    References:
+    [1] Knuth, D. The Art of Computer Programming.
+    """
+    fallback = RegexHeuristicFallback()
+    result = fallback.parse_text(academic_text)
+    assert result.is_receipt is False
+    assert result.status == "failed"
+    assert result.error_code == "NON_RECEIPT_DOCUMENT"
+    assert result.confidence == 0.0
+    assert result.merchant_name is None
+    assert result.items == []
+
+
+def test_valid_indian_receipt_inr():
+    """Tests extraction of Indian receipt with ₹ / Rs. currency and GST."""
+    indian_receipt_text = """
+    Saravana Bhavan Restaurant
+    12 Connaught Place, New Delhi
+    Date: 2026-11-08
+    Invoice: SB-8492
+    Masala Dosa 2 240.00
+    Filter Coffee 2 80.00
+    Subtotal: Rs. 320.00
+    GST 5%: Rs. 16.00
+    TOTAL AMOUNT: Rs. 336.00
+    Payment: Cash
+    """
+    fallback = RegexHeuristicFallback()
+    result = fallback.parse_text(indian_receipt_text)
+
+    assert result.is_receipt is True
+    assert result.currency == "INR"
+    assert result.merchant_name == "Saravana Bhavan Restaurant"
+    assert result.subtotal == Decimal("320.00")
+    assert result.tax == Decimal("16.00")
+    assert result.final_total == Decimal("336.00")
+    assert len(result.items) >= 2
+
+
+def test_low_confidence_review_gate():
+    """Low confidence extractions must be caught by validate_receipt."""
+    service = ReceiptExtractionService()
+    low_conf_result = ReceiptExtractionResult(
+        is_receipt=True,
+        confidence=0.10,
+        items=[],
+        final_total=None,
+    )
+    with pytest.raises(ReceiptExtractionError, match="confidence is insufficient"):
+        service.validate_receipt(low_conf_result)
 
 
 # =============================================================================
-# 7. END-TO-END EXTRACTION WITH ALL 5 FIXTURES
+# 7. END-TO-END EXTRACTION WITH FIXTURES (NO SILENT FALLBACK)
 # =============================================================================
 
 def test_fixture_01_clear_restaurant():
@@ -373,12 +524,13 @@ def test_fixture_01_clear_restaurant():
     result = service.extract_from_path(path)
 
     assert result is not None
-    assert result.is_fallback is True  # Offline test mode without API key
-    assert len(result.warnings) > 0
-    # Verified adapter compatibility
-    backend_payload = result.to_backend_contract()
-    assert "merchant_name" in backend_payload
-    assert "total" in backend_payload
+    # Critical requirement: Without API key, fails immediately with API_KEY_MISSING, never silently falls back
+    assert result.status == "failed"
+    assert result.error_code == "API_KEY_MISSING"
+    assert result.is_fallback is False
+    assert result.confidence == 0.0
+    frontend_payload = result.to_frontend_contract()
+    assert "is_receipt" in frontend_payload
 
 
 def test_fixture_02_blurry_takeout():
@@ -386,7 +538,7 @@ def test_fixture_02_blurry_takeout():
     path = FIXTURES_DIR / "receipt_02_blurry_takeout.png"
     result = service.extract_from_path(path)
 
-    # Must contain blur detection warning
+    # Blur detection runs during preprocessing
     assert any("blurry" in w.lower() for w in result.warnings)
 
 
@@ -412,8 +564,285 @@ def test_fixture_05_digital_invoice_pdf():
     result = service.extract_from_path(path)
 
     assert result is not None
-    # Verified that PDF was rendered and processed
+    # Without configured Gemini API key, fails immediately with API_KEY_MISSING (no silent fallback)
+    assert result.status == "failed"
+    assert result.error_code == "API_KEY_MISSING"
     frontend_payload = result.to_frontend_contract()
     assert "items" in frontend_payload
-    assert "total" in frontend_payload
+
+
+# =============================================================================
+# 8. MANDATORY CHECKLIST & APPROVED CONTRACT COMPLIANCE TESTS
+# =============================================================================
+
+def test_missing_quantity_remains_null():
+    """Requirement 4: Missing quantity MUST remain null, never defaulting to 1."""
+    item = ExtractedLineItem(
+        item_name="Sparkling Water",
+        quantity=None,
+        unit_price=Decimal("4.00"),
+        total_price=Decimal("4.00"),
+    )
+    assert item.quantity is None
+    d = item.to_dict()
+    assert d["quantity"] is None
+
+
+def test_missing_prices_remain_null():
+    """Requirement 5: Missing prices MUST remain null, never defaulting to 0.00."""
+    item = ExtractedLineItem(
+        item_name="Market Price Catch of the Day",
+        quantity=1,
+        unit_price=None,
+        total_price=None,
+    )
+    assert item.unit_price is None
+    assert item.total_price is None
+    d = item.to_dict()
+    assert d["unit_price"] is None
+    assert d["total_price"] is None
+
+
+def test_no_unknown_merchant_fabrication():
+    """Requirement 2: Never fabricate 'Unknown Merchant'."""
+    result = ReceiptExtractionResult(
+        is_receipt=True,
+        merchant_name=None,
+        currency="USD",
+        items=[
+            ExtractedLineItem(item_name="Item 1", quantity=1, unit_price=Decimal("5.00"), total_price=Decimal("5.00")),
+        ],
+        final_total=Decimal("5.00"),
+    )
+    # Backend contract raises ValueError when merchant_name is missing
+    with pytest.raises(ValueError, match="merchant_name is missing"):
+        result.to_backend_contract()
+
+    # Frontend and API responses preserve None
+    api_resp = result.to_api_response()
+    assert api_resp["merchant_name"] is None
+
+    frontend_resp = result.to_frontend_contract()
+    assert frontend_resp["merchant"] is None
+
+
+def test_status_completed_on_fully_verified_receipt():
+    """Requirement 11: Valid, confident, complete receipt returns completed."""
+    result = ReceiptExtractionResult(
+        is_receipt=True,
+        merchant_name="Artisan Bistro",
+        currency="USD",
+        receipt_date="2026-11-09",
+        subtotal=Decimal("40.00"),
+        tax=Decimal("4.00"),
+        final_total=Decimal("44.00"),
+        confidence=0.95,
+        is_fallback=False,
+        items=[
+            ExtractedLineItem(item_name="Pizza", quantity=1, unit_price=Decimal("20.00"), total_price=Decimal("20.00")),
+            ExtractedLineItem(item_name="Salad", quantity=2, unit_price=Decimal("10.00"), total_price=Decimal("20.00")),
+        ],
+    )
+    result.validate_math_consistency()
+    assert result.status == "completed"
+    assert result.missing_fields == []
+    assert result.uncertain_fields == []
+
+
+def test_status_review_required_on_incomplete_receipt():
+    """Requirement 12: Incomplete or uncertain receipt returns review_required."""
+    result = ReceiptExtractionResult(
+        is_receipt=True,
+        merchant_name="Mario's",
+        currency=None,  # Missing currency
+        subtotal=Decimal("20.00"),
+        final_total=None,  # Missing total
+        confidence=0.50,
+        items=[],
+    )
+    result.validate_math_consistency()
+    assert result.status == "review_required"
+    assert "currency" in result.missing_fields
+    assert "final_total" in result.missing_fields
+    assert "items" in result.missing_fields
+
+
+def test_gemini_failure_returns_failed_status(monkeypatch):
+    """Requirement 7: Gemini failure returns status: failed with error_code."""
+    extractor = GeminiVisionExtractor(api_key="test-api-key")
+
+    # Mock client generate_content to simulate API failure
+    def mock_generate_content(*args, **kwargs):
+        raise RuntimeError("API quota exceeded (HTTP 429)")
+
+    class MockModels:
+        generate_content = staticmethod(mock_generate_content)
+
+    class MockGenaiClient:
+        models = MockModels()
+
+    import google.genai
+    monkeypatch.setattr(google.genai, "Client", lambda api_key: MockGenaiClient())
+
+    img = Image.new("RGB", (100, 100), color="white")
+    result = extractor.extract(img)
+
+    assert result.status == "failed"
+    assert result.is_receipt is False
+    assert result.error_code == "AI_EXTRACTION_FAILED"
+    assert "quota exceeded" in result.error_message
+    assert result.confidence == 0.0
+
+
+def test_gemini_timeout_returns_failed_status(monkeypatch):
+    """Requirement 8: Gemini timeout returns status: failed with error_code: TIMEOUT."""
+    import time
+    extractor = GeminiVisionExtractor(api_key="test-api-key")
+
+    # Temporarily shorten timeout for quick test
+    import app.services.receipt_extractor.llm_parser as parser_module
+    monkeypatch.setattr(parser_module, "GEMINI_TIMEOUT_SECONDS", 0.1)
+
+    def mock_hanging_call(*args, **kwargs):
+        time.sleep(1.0)
+        return None
+
+    class MockModels:
+        generate_content = staticmethod(mock_hanging_call)
+
+    class MockGenaiClient:
+        models = MockModels()
+
+    import google.genai
+    monkeypatch.setattr(google.genai, "Client", lambda api_key: MockGenaiClient())
+
+    img = Image.new("RGB", (100, 100), color="white")
+    result = extractor.extract(img)
+
+    assert result.status == "failed"
+    assert result.is_receipt is False
+    assert result.error_code == "TIMEOUT"
+    assert "timed out" in result.error_message.lower()
+
+
+def test_all_response_arrays_always_present():
+    """Requirement 13: items, missing_fields, uncertain_fields, warnings must always be present."""
+    failed_result = ReceiptExtractionResult(
+        status="failed",
+        is_receipt=False,
+        error_code="TEST_ERROR",
+        error_message="Test failure",
+    )
+    api_resp = failed_result.to_api_response()
+    assert isinstance(api_resp["items"], list)
+    assert isinstance(api_resp["missing_fields"], list)
+    assert isinstance(api_resp["uncertain_fields"], list)
+    assert isinstance(api_resp["warnings"], list)
+
+
+def test_monetary_values_decimal_strings_in_api_response():
+    """Requirement 15: Monetary values use Decimal internally and decimal strings externally."""
+    result = ReceiptExtractionResult(
+        is_receipt=True,
+        merchant_name="Cafe",
+        currency="USD",
+        subtotal=Decimal("45.50"),
+        tax=Decimal("4.55"),
+        tip=Decimal("5.00"),
+        discount=Decimal("2.00"),
+        final_total=Decimal("53.05"),
+        items=[
+            ExtractedLineItem(item_name="Coffee", quantity=2, unit_price=Decimal("4.50"), total_price=Decimal("9.00")),
+        ],
+    )
+    api_resp = result.to_api_response()
+    assert api_resp["subtotal"] == "45.50"
+    assert api_resp["tax"] == "4.55"
+    assert api_resp["tip"] == "5.00"
+    assert api_resp["discount"] == "2.00"
+    assert api_resp["total"] == "53.05"
+    assert api_resp["final_total"] == "53.05"
+    assert api_resp["items"][0]["unit_price"] == "4.50"
+    assert api_resp["items"][0]["total_price"] == "9.00"
+
+
+def test_approved_contract_field_set():
+    """Verifies that to_api_response() contains all 14 single-source-of-truth fields."""
+    result = ReceiptExtractionResult(
+        is_receipt=True,
+        merchant_name="Bistro",
+        currency="USD",
+        subtotal=Decimal("10.00"),
+        tax=Decimal("1.00"),
+        final_total=Decimal("11.00"),
+        items=[],
+    )
+    api_resp = result.to_api_response()
+    required_fields = [
+        "document_type",
+        "merchant_name",
+        "currency",
+        "subtotal",
+        "tax",
+        "final_total",
+        "items",
+        "missing_fields",
+        "uncertain_fields",
+        "confidence",
+        "warnings",
+        "status",
+        "error_code",
+        "error_message",
+    ]
+    for field in required_fields:
+        assert field in api_resp, f"Required contract field missing: {field}"
+
+
+def test_gemini_failure_never_triggers_regex_fallback(monkeypatch):
+    """Critical Requirement 3: No regex or local fallback may silently replace a failed Gemini extraction."""
+    service = ReceiptExtractionService(api_key="test-key")
+
+    def mock_broken_call(*args, **kwargs):
+        raise RuntimeError("Google GenAI 500: Internal Server Error")
+
+    class MockModels:
+        generate_content = staticmethod(mock_broken_call)
+
+    class MockGenaiClient:
+        models = MockModels()
+
+    import google.genai
+    monkeypatch.setattr(google.genai, "Client", lambda api_key: MockGenaiClient())
+
+    img = Image.new("RGB", (100, 100), color="white")
+    import io
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    raw_bytes = buf.getvalue()
+
+    result = service.extract_from_bytes(raw_bytes, filename="receipt.png")
+
+    # MUST return failed, NEVER silent regex fallback
+    assert result.status == "failed"
+    assert result.error_code == "AI_EXTRACTION_FAILED"
+    assert result.is_fallback is False
+    assert result.confidence == 0.0
+    assert result.items == []
+
+
+def test_approved_interface_callable():
+    """Verifies exact method signatures: extract_from_bytes and extract_from_path."""
+    service = ReceiptExtractionService()
+
+    # extract_from_bytes callable with exact parameter names
+    res1 = service.extract_from_bytes(file_bytes=b"", filename="receipt.jpg")
+    assert res1.status == "failed"
+    assert res1.error_code == "EMPTY_FILE"
+
+    # extract_from_path callable with exact parameter names
+    sharp_path = FIXTURES_DIR / "receipt_01_clear_restaurant.png"
+    res2 = service.extract_from_path(file_path=sharp_path)
+    assert res2 is not None
+
+
 

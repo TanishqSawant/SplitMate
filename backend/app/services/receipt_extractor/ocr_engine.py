@@ -1,9 +1,8 @@
 """OCR and Vision extraction engine abstraction.
 
 Coordinates between:
-1. Gemini Vision multimodal extraction (primary)
-2. Local OCR engines (Tesseract / EasyOCR) if installed on host
-3. Heuristic fallback when offline
+1. Gemini Vision multimodal extraction (primary and sole extraction engine)
+2. Local OCR / PDF text extraction strictly as supporting preprocessing context
 """
 
 import logging
@@ -13,13 +12,18 @@ from typing import Any
 from PIL import Image
 
 from .schemas import ReceiptExtractionResult
-from .llm_parser import GeminiVisionExtractor, RegexHeuristicFallback
+from .llm_parser import GeminiVisionExtractor
 
 logger = logging.getLogger(__name__)
 
 
 class OCREngine:
-    """Unified OCR and Vision engine for receipt text and layout extraction."""
+    """Unified OCR and Vision engine for receipt text and layout extraction.
+    
+    Local OCR (Tesseract / pypdfium2 embedded text) is strictly used as an input
+    preprocessing and supporting step to provide text context to Gemini Vision.
+    It is never used as a silent fallback substitute for failed Gemini requests.
+    """
 
     def __init__(
         self,
@@ -28,7 +32,6 @@ class OCREngine:
     ):
         self.preferred_engine = preferred_engine
         self.gemini_extractor = GeminiVisionExtractor(api_key=api_key)
-        self.fallback_parser = RegexHeuristicFallback()
 
     @staticmethod
     def is_tesseract_available() -> bool:
@@ -43,7 +46,7 @@ class OCREngine:
         return False
 
     def extract_text_local_ocr(self, image: Image.Image) -> str:
-        """Extracts text using local Tesseract if available; otherwise returns empty string."""
+        """Extracts text using local Tesseract if available as a supporting preprocessing step."""
         if not self.is_tesseract_available():
             logger.warning("Local Tesseract executable is not installed on this system.")
             return ""
@@ -67,37 +70,39 @@ class OCREngine:
         embedded_text: str = "",
         initial_warnings: list[str] | None = None,
     ) -> ReceiptExtractionResult:
-        """Processes the receipt image and extracts structured data.
+        """Processes the receipt image and extracts structured data via Gemini Vision.
         
-        Strategy:
-        1. If Gemini Vision is available, pass the preprocessed image and any embedded text to Gemini.
-        2. If local OCR text is available and Gemini is offline, use fallback parser on local OCR text.
-        3. If Gemini is offline and no local OCR exists, use fallback parser on embedded text or report degraded status.
+        Local OCR and embedded PDF text serve solely as preprocessing steps to provide
+        supporting text context to Gemini Vision. If Gemini is unavailable or fails,
+        the service returns a failed status with an explicit error code.
+        No silent regex or OCR substitute is used.
         """
         warnings = list(initial_warnings or [])
 
-        # Check local OCR availability
+        # Check local OCR availability (used solely as supporting text context)
         has_local_ocr = self.is_tesseract_available()
         ocr_text = embedded_text
 
         if not ocr_text and has_local_ocr:
             ocr_text = self.extract_text_local_ocr(image)
 
-        # Primary route: Gemini Vision
-        if self.gemini_extractor.is_available():
-            return self.gemini_extractor.extract(
-                image=image,
-                text_context=ocr_text,
-                initial_warnings=warnings,
+        # Primary and only extraction engine: Gemini Vision
+        if not self.gemini_extractor.is_available():
+            warnings.append("GEMINI_API_KEY environment variable is not configured.")
+            return ReceiptExtractionResult(
+                status="failed",
+                document_type="receipt",
+                is_receipt=False,
+                error_code="API_KEY_MISSING",
+                error_message="GEMINI_API_KEY environment variable is not configured.",
+                confidence=0.0,
+                items=[],
+                warnings=warnings,
             )
 
-        # If Gemini is not configured, inform the user clearly
-        warnings.append("Gemini API key is not configured. Running in offline fallback mode.")
-        if not has_local_ocr:
-            warnings.append("Local Tesseract binary is not installed on this system.")
-
-        return self.fallback_parser.parse_text(
-            text=ocr_text,
+        return self.gemini_extractor.extract(
+            image=image,
+            text_context=ocr_text,
             initial_warnings=warnings,
         )
 
