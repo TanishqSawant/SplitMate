@@ -35,10 +35,15 @@ export const API_ENDPOINTS = {
     SETTLE: '/expenses/settle',
   },
 
-  // AI Receipt Extraction (Pawan)
+  // AI Receipt Extraction (Pawan + Tanishq)
+  // Backend contract (receipts.py):
+  //   POST /api/receipts/upload           → upload file, returns {id, extraction_status: 'PENDING'}
+  //   GET  /api/receipts/{receipt_id}     → poll status; extraction_status becomes 'COMPLETED' once Pawan's AI service processes it
+  //   POST /api/receipts/{receipt_id}/extraction → Pawan's AI service submits results (internal, not called by frontend)
   RECEIPTS: {
-    EXTRACT: '/receipts/extract',
-    SAMPLE_RECEIPTS: '/receipts/samples',
+    UPLOAD: '/receipts/upload',
+    GET: (receiptId) => `/receipts/${receiptId}`,
+    SUBMIT_EXTRACTION: (receiptId) => `/receipts/${receiptId}/extraction`,
   },
 
   // PayPal Sandbox Integration (Tanay)

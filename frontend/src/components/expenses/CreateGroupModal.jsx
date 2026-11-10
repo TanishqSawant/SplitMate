@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Users, Plus, Check } from 'lucide-react';
+import { Check } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import { useAuth } from '../../context/AuthContext';
 import Modal from '../common/Modal';

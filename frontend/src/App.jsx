@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ThemeProvider } from './context/ThemeContext';
-import { AuthProvider } from './context/AuthContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { ExpenseProvider, useExpenses } from './context/ExpenseContext';
 
 import Navbar from './components/common/Navbar';
@@ -13,6 +13,7 @@ import PayPalView from './views/PayPalView';
 import TransactionsView from './views/TransactionsView';
 import AnalyticsView from './views/AnalyticsView';
 import SettingsView from './views/SettingsView';
+import AuthView from './views/AuthView';
 
 import PayPalPaymentModal from './components/payments/PayPalPaymentModal';
 import ExpenseDetailModal from './components/expenses/ExpenseDetailModal';
@@ -20,6 +21,7 @@ import CreateGroupModal from './components/expenses/CreateGroupModal';
 import AddExpenseModal from './components/expenses/AddExpenseModal';
 
 function MainApp() {
+  const { isAuthenticated, currentUser } = useAuth();
   const [currentView, setCurrentView] = useState('dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
@@ -27,6 +29,10 @@ function MainApp() {
   const [selectedExpense, setSelectedExpense] = useState(null);
 
   const { loadSampleReceipt } = useExpenses();
+
+  if (!isAuthenticated || !currentUser) {
+    return <AuthView />;
+  }
 
   const handleScanReceipt = () => {
     setCurrentView('receipt-scan');

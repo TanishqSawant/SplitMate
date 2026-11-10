@@ -1,19 +1,15 @@
 import React from 'react';
 import {
   TrendingUp,
-  TrendingDown,
   ArrowUpRight,
   ArrowDownLeft,
-  DollarSign,
   Wallet,
   Users
 } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
-import { useAuth } from '../../context/AuthContext';
 
 export default function MetricCards({ onNavigate }) {
   const { summary, groups, expenses } = useExpenses();
-  const { currentUser } = useAuth();
 
   const totalGroupSpending = expenses.reduce((sum, e) => sum + e.amount, 0);
 

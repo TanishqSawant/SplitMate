@@ -21,6 +21,41 @@ class CalculatedSplit(NamedTuple):
     currency: str
 
 
+def is_expense_fully_assigned(expense: Expense) -> tuple[bool, str]:
+    """Check whether every receipt item on the expense has been fully assigned.
+
+    Returns (True, "") when fully assigned.
+    Returns (False, human-readable detail string) when any item is unassigned or partially
+    assigned.
+
+    This is used by initialize_payments to prevent distributing an incomplete bill.
+    """
+    if not expense.receipt_id or not expense.receipt:
+        # No receipt linked — manual expense, skip the check
+        return True, ""
+
+    # Sum assigned quantities per receipt item
+    assigned_totals: dict[uuid.UUID, Decimal] = defaultdict(lambda: Decimal("0"))
+    for assignment in expense.assignments:
+        assigned_totals[assignment.receipt_item_id] += Decimal(str(assignment.share_quantity))
+
+    problems: list[str] = []
+    for item in expense.receipt.items:
+        purchased = Decimal(str(item.quantity))
+        assigned = assigned_totals.get(item.id, Decimal("0"))
+        if assigned < purchased:
+            # Format without trailing zeros for readability
+            assigned_str = f"{assigned:f}".rstrip("0").rstrip(".") or "0"
+            purchased_str = f"{purchased:f}".rstrip("0").rstrip(".") or "0"
+            problems.append(
+                f"'{item.item_name}' (assigned {assigned_str}/{purchased_str})"
+            )
+
+    if problems:
+        return False, "Unassigned items: " + ", ".join(problems) + "."
+    return True, ""
+
+
 def calculate_splits_for_expense(
     expense: Expense, db: Session
 ) -> list[CalculatedSplit]:

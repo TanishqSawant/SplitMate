@@ -19,7 +19,7 @@ export const MOCK_USERS = [
     email: 'tanishq@splitmate.io',
     avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
     paypalEmail: 'tanishq-buyer@sandbox.paypal.com',
-    role: 'FastAPI Backend Lead',
+    role: 'Backend & Database Lead',
   },
   {
     id: 'usr_pawan',
