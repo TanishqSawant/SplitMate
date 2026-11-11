@@ -11,6 +11,7 @@ Tests:
 8. Error handling for invalid files, empty uploads, and oversized files.
 """
 
+import json
 from decimal import Decimal
 from pathlib import Path
 import pytest

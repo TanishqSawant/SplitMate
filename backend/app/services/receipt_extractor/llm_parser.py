@@ -29,7 +29,7 @@ CRITICAL CLASSIFICATION & EXTRACTION RULES:
    - is_receipt: Set to true ONLY if the document is an authentic commercial financial receipt, restaurant bill, retail bill, or business invoice representing purchased goods, dishes, or services with payable amounts.
    - Set is_receipt to false if the image contains academic notes, homework, algorithms, data structures, conversion tables (e.g. infix-to-postfix), charts, slides, code snippets, random photographs, blank images, or memes.
    - rejection_reason: If is_receipt is false, clearly explain why (e.g. 'Document is an academic conversion table, not a financial receipt.'). If is_receipt is true, set to null.
-   - If is_receipt is false, you MUST return: merchant_name: null, items: [], subtotal: null, tax: null, tip: null, discount: null, final_total: null, confidence: 0.0.
+   - If is_receipt is false, you MUST return: merchant_name: null, merchant_address: null, receipt_date: null, receipt_number: null, currency: null, items: [], subtotal: null, tax: null, tip: null, discount: null, final_total: null, confidence: 0.0.
 
 2. IF AND ONLY IF is_receipt is true, extract the following fields:
    - merchant_name: Legal or commercial business name (e.g. "Mario's Bistro") or null if unreadable.
@@ -393,6 +393,7 @@ class GeminiVisionExtractor:
             # Strict handling of non-receipt classification
             if parsed_dict.get("is_receipt") is False:
                 parsed_dict["status"] = "failed"
+                parsed_dict["document_type"] = "non_receipt"
                 parsed_dict["error_code"] = "NON_RECEIPT_DOCUMENT"
                 parsed_dict["error_message"] = (
                     parsed_dict.get("rejection_reason")
@@ -401,11 +402,17 @@ class GeminiVisionExtractor:
                 parsed_dict["confidence"] = 0.0
                 parsed_dict["items"] = []
                 parsed_dict["merchant_name"] = None
+                parsed_dict["merchant_address"] = None
+                parsed_dict["receipt_date"] = None
+                parsed_dict["receipt_number"] = None
+                parsed_dict["currency"] = None
                 parsed_dict["subtotal"] = None
                 parsed_dict["tax"] = None
                 parsed_dict["tip"] = None
                 parsed_dict["discount"] = None
                 parsed_dict["final_total"] = None
+                parsed_dict["missing_fields"] = []
+                parsed_dict["uncertain_fields"] = []
             else:
                 # Do NOT replace missing confidence with 0.95! Calculate honest score
                 if not parsed_dict.get("confidence") or parsed_dict["confidence"] <= 0.0:

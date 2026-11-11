@@ -154,11 +154,17 @@ class ReceiptExtractionResult(BaseModel):
             self.confidence = 0.0
             self.items = []
             self.merchant_name = None
+            self.merchant_address = None
+            self.receipt_date = None
+            self.receipt_number = None
+            self.currency = None
             self.subtotal = None
             self.tax = None
             self.tip = None
             self.discount = None
             self.final_total = None
+            self.missing_fields = []
+            self.uncertain_fields = []
             return
 
         if self.status == "failed":
