@@ -77,7 +77,7 @@ class ReceiptExtractionService:
                 result.rejection_reason or result.error_message or "Uploaded document does not appear to be a valid financial receipt or invoice."
             )
 
-        if result.confidence < 0.20 and not result.items:
+        if not result.items and (result.confidence is None or result.confidence < 0.20):
             raise ReceiptExtractionError(
                 "Document extraction confidence is insufficient and no line items were identified. "
                 "Please upload a clear, legible receipt."
@@ -102,11 +102,14 @@ class ReceiptExtractionService:
                 raise ReceiptExtractionError(msg)
             return ReceiptExtractionResult(
                 status="failed",
+                document_type="receipt",
                 is_receipt=False,
                 error_code="EMPTY_FILE",
                 error_message=msg,
-                confidence=0.0,
+                confidence=None,
                 items=[],
+                missing_fields=[],
+                uncertain_fields=[],
                 warnings=[msg],
             )
 
@@ -116,11 +119,14 @@ class ReceiptExtractionService:
                 raise ReceiptExtractionError(msg)
             return ReceiptExtractionResult(
                 status="failed",
+                document_type="receipt",
                 is_receipt=False,
                 error_code="INVALID_FILENAME",
                 error_message=msg,
-                confidence=0.0,
+                confidence=None,
                 items=[],
+                missing_fields=[],
+                uncertain_fields=[],
                 warnings=[msg],
             )
 
@@ -131,11 +137,14 @@ class ReceiptExtractionService:
                 raise ReceiptExtractionError(msg)
             return ReceiptExtractionResult(
                 status="failed",
+                document_type="receipt",
                 is_receipt=False,
                 error_code="UNSUPPORTED_FORMAT",
                 error_message=msg,
-                confidence=0.0,
+                confidence=None,
                 items=[],
+                missing_fields=[],
+                uncertain_fields=[],
                 warnings=[msg],
             )
 
@@ -148,11 +157,14 @@ class ReceiptExtractionService:
                 raise ReceiptExtractionError(msg)
             return ReceiptExtractionResult(
                 status="failed",
+                document_type="receipt",
                 is_receipt=False,
                 error_code="FILE_TOO_LARGE",
                 error_message=msg,
-                confidence=0.0,
+                confidence=None,
                 items=[],
+                missing_fields=[],
+                uncertain_fields=[],
                 warnings=[msg],
             )
 
@@ -170,11 +182,14 @@ class ReceiptExtractionService:
                     raise ReceiptExtractionError(msg) from e
                 return ReceiptExtractionResult(
                     status="failed",
+                    document_type="receipt",
                     is_receipt=False,
                     error_code="CORRUPTED_PDF",
                     error_message=msg,
-                    confidence=0.0,
+                    confidence=None,
                     items=[],
+                    missing_fields=[],
+                    uncertain_fields=[],
                     warnings=[msg],
                 )
 
@@ -205,11 +220,14 @@ class ReceiptExtractionService:
                 raise ReceiptExtractionError(msg) from e
             return ReceiptExtractionResult(
                 status="failed",
+                document_type="receipt",
                 is_receipt=False,
                 error_code="CORRUPTED_IMAGE",
                 error_message=msg,
-                confidence=0.0,
+                confidence=None,
                 items=[],
+                missing_fields=[],
+                uncertain_fields=[],
                 warnings=[msg],
             )
 
@@ -234,7 +252,21 @@ class ReceiptExtractionService:
         """Reads file from disk path and performs extraction."""
         path = Path(file_path)
         if not path.is_file():
-            raise ReceiptExtractionError(f"File not found: {file_path}")
+            msg = f"File not found: {file_path}"
+            if raise_on_error or reject_non_receipt:
+                raise ReceiptExtractionError(msg)
+            return ReceiptExtractionResult(
+                status="failed",
+                document_type="receipt",
+                is_receipt=False,
+                error_code="FILE_NOT_FOUND",
+                error_message=msg,
+                confidence=None,
+                items=[],
+                missing_fields=[],
+                uncertain_fields=[],
+                warnings=[msg],
+            )
 
         file_bytes = path.read_bytes()
         return self.extract_from_bytes(

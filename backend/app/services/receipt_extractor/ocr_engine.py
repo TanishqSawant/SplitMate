@@ -95,8 +95,10 @@ class OCREngine:
                 is_receipt=False,
                 error_code="API_KEY_MISSING",
                 error_message="GEMINI_API_KEY environment variable is not configured.",
-                confidence=0.0,
+                confidence=None,
                 items=[],
+                missing_fields=[],
+                uncertain_fields=[],
                 warnings=warnings,
             )
 

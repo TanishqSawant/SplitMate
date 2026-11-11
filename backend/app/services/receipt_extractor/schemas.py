@@ -38,11 +38,25 @@ class ExtractedLineItem(BaseModel):
     """Line item extracted from receipt.
     
     Adheres to the strict rule: Missing quantity or price must remain null, never invented.
+    Supports fractional quantities using Decimal.
     """
     item_name: str = Field(..., min_length=1, max_length=255, description="Name or description of line item")
-    quantity: int | None = Field(default=None, ge=1, description="Quantity purchased or null if missing")
+    quantity: Decimal | None = Field(default=None, description="Quantity purchased (supports fractional Decimal values) or null if missing")
     unit_price: Decimal | None = Field(default=None, ge=0, description="Unit price per item or null if missing")
     total_price: Decimal | None = Field(default=None, ge=0, description="Total price for line item or null if missing")
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def parse_quantity(cls, v: Any) -> Decimal | None:
+        if v is None or v == "":
+            return None
+        try:
+            val = Decimal(str(v))
+            if val <= Decimal("0"):
+                return None
+            return val
+        except Exception:
+            return None
 
     @field_validator("unit_price", "total_price", mode="before")
     @classmethod
@@ -51,17 +65,8 @@ class ExtractedLineItem(BaseModel):
             return None
         return _quantize_decimal(v)
 
-    @model_validator(mode="after")
-    def reconcile_item_total(self) -> "ExtractedLineItem":
-        # Only derive when both components exist; never invent missing values
-        if self.total_price is None and self.unit_price is not None and self.quantity is not None:
-            self.total_price = (self.unit_price * self.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        elif self.unit_price is None and self.total_price is not None and self.quantity is not None and self.quantity > 0:
-            self.unit_price = (self.total_price / self.quantity).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        return self
-
     def to_dict(self) -> dict[str, Any]:
-        """Serializes line item with decimal strings for monetary values."""
+        """Serializes line item preserving Decimal values and nulls."""
         return {
             "item_name": self.item_name,
             "quantity": self.quantity,
@@ -105,12 +110,12 @@ class ReceiptExtractionResult(BaseModel):
     final_total: Decimal | None = Field(default=None, ge=0, description="Final payable amount, or null")
 
     # 6. Extraction Quality Metadata & Review Fields
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Overall confidence score (0.0 to 1.0)")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Overall confidence score (0.0 to 1.0) or null if unavailable")
     missing_fields: list[str] = Field(default_factory=list, description="Fields genuinely missing from receipt")
     uncertain_fields: list[str] = Field(default_factory=list, description="Fields with math discrepancies or low legibility")
     warnings: list[str] = Field(default_factory=list, description="Quality warnings, blur notices, or missing field diagnostics")
     is_fallback: bool = Field(default=False, description="True if heuristic/regex fallback was used instead of primary AI model")
-    extraction_method: str = Field(default="gemini_vision", description="Method name: gemini_vision or regex_heuristic_fallback")
+    extraction_method: str = Field(default="gemini_vision", description="Method name: gemini_vision")
 
     @field_validator("currency", mode="before")
     @classmethod
@@ -135,12 +140,55 @@ class ReceiptExtractionResult(BaseModel):
             return upper
         return None
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clean_confidence(cls, v: Any) -> float | None:
+        if v is None or v == "":
+            return None
+        try:
+            val = float(v)
+            if 0.0 <= val <= 1.0:
+                return round(val, 2)
+            return None
+        except (ValueError, TypeError):
+            return None
+
     @field_validator("subtotal", "tax", "discount", "tip", "final_total", mode="before")
     @classmethod
     def parse_optional_decimals(cls, v: Any) -> Decimal | None:
         if v is None or v == "":
             return None
         return _quantize_decimal(v)
+
+    @model_validator(mode="after")
+    def clean_non_receipt_fields(self) -> "ReceiptExtractionResult":
+        """Enforces that when is_receipt is False, all receipt-specific fields are cleared."""
+        if not self.is_receipt:
+            self.status = "failed"
+            self.document_type = "non_receipt"
+            if not self.error_code:
+                self.error_code = "NON_RECEIPT_DOCUMENT"
+            if not self.error_message:
+                self.error_message = (
+                    self.rejection_reason
+                    or "Document does not qualify as a valid financial receipt or invoice."
+                )
+            if self.confidence != 0.0:
+                self.confidence = None
+            self.items = []
+            self.merchant_name = None
+            self.merchant_address = None
+            self.receipt_date = None
+            self.receipt_number = None
+            self.currency = None
+            self.subtotal = None
+            self.tax = None
+            self.tip = None
+            self.discount = None
+            self.final_total = None
+            self.missing_fields = []
+            self.uncertain_fields = []
+        return self
 
     def evaluate_status(self) -> None:
         """Evaluates whether status is 'completed', 'review_required', or 'failed'."""
@@ -151,7 +199,8 @@ class ReceiptExtractionResult(BaseModel):
                 self.error_code = "NON_RECEIPT_DOCUMENT"
             if not self.error_message:
                 self.error_message = self.rejection_reason or "Document does not qualify as a valid financial receipt or invoice."
-            self.confidence = 0.0
+            if self.confidence != 0.0:
+                self.confidence = None
             self.items = []
             self.merchant_name = None
             self.merchant_address = None
@@ -168,7 +217,6 @@ class ReceiptExtractionResult(BaseModel):
             return
 
         if self.status == "failed":
-            self.confidence = 0.0
             return
 
         if not self.document_type:
@@ -202,6 +250,7 @@ class ReceiptExtractionResult(BaseModel):
         if (
             self.missing_fields
             or self.uncertain_fields
+            or self.confidence is None
             or self.confidence < 0.70
             or self.is_fallback
         ):
@@ -214,6 +263,7 @@ class ReceiptExtractionResult(BaseModel):
         
         Checks if subtotal + tax + tip - discount reconciles with final_total.
         Marks uncertain_fields and adjusts confidence if a discrepancy is found.
+        Never recalculates or fabricates missing numbers.
         """
         if self.final_total is not None and self.subtotal is not None:
             expected_total = (
@@ -234,7 +284,8 @@ class ReceiptExtractionResult(BaseModel):
                     self.uncertain_fields.append("final_total")
                 if "subtotal" not in self.uncertain_fields:
                     self.uncertain_fields.append("subtotal")
-                self.confidence = max(0.1, round(self.confidence * 0.85, 2))
+                if self.confidence is not None:
+                    self.confidence = max(0.1, round(self.confidence * 0.85, 2))
 
         self.evaluate_status()
 
@@ -259,7 +310,6 @@ class ReceiptExtractionResult(BaseModel):
             })
 
         return {
-            "status": self.status,
             "document_type": self.document_type,
             "merchant_name": self.merchant_name,
             "currency": self.currency,
@@ -268,10 +318,11 @@ class ReceiptExtractionResult(BaseModel):
             "final_total": str(self.final_total) if self.final_total is not None else None,
             "total": str(self.final_total) if self.final_total is not None else None,
             "items": items_payload,
-            "missing_fields": self.missing_fields,
-            "uncertain_fields": self.uncertain_fields,
+            "missing_fields": list(self.missing_fields),
+            "uncertain_fields": list(self.uncertain_fields),
             "confidence": self.confidence,
-            "warnings": self.warnings,
+            "warnings": list(self.warnings),
+            "status": self.status,
             "error_code": self.error_code,
             "error_message": self.error_message,
             "is_receipt": self.is_receipt,
@@ -285,6 +336,10 @@ class ReceiptExtractionResult(BaseModel):
             "extraction_method": self.extraction_method,
         }
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serializes extraction result matching the approved contract."""
+        return self.to_api_response()
+
     def to_backend_contract(self) -> dict[str, Any]:
         """Converts canonical extraction result into Tanishq's ReceiptExtractionRequest payload.
         
@@ -296,8 +351,10 @@ class ReceiptExtractionResult(BaseModel):
         - total: Decimal
         - items: list[ReceiptItemExtraction]
 
-        Strictly rejects non-receipt documents or extractions without items.
+        Strictly rejects non-receipt documents.
         Never generates dummy fallback items. Never fabricates 'Unknown Merchant'.
+        Never fabricates zero amounts, default currency, or quantity=1.
+        Preserves fractional quantities as Decimal and preserves None for missing fields.
         """
         if not self.is_receipt:
             raise ValueError(
@@ -305,84 +362,43 @@ class ReceiptExtractionResult(BaseModel):
                 f"{self.rejection_reason or self.error_message or 'Document was rejected as a non-receipt.'}"
             )
 
-        if not self.items:
-            raise ValueError(
-                "Cannot generate backend contract: No line items extracted from receipt. "
-                "Receipts must contain at least 1 verified line item."
-            )
-
-        if not self.merchant_name:
-            raise ValueError(
-                "Cannot generate backend contract: merchant_name is missing. "
-                "Review is required before persisting to backend."
-            )
-
-        merchant = self.merchant_name.strip()
-        subtotal_val = self.subtotal if self.subtotal is not None else Decimal("0.00")
-        tax_val = self.tax if self.tax is not None else Decimal("0.00")
-        total_val = self.final_total if self.final_total is not None else (subtotal_val + tax_val)
-
+        merchant = self.merchant_name.strip() if self.merchant_name else None
         items_payload = []
         for item in self.items:
-            tot = item.total_price if item.total_price is not None else Decimal("0.00")
-            unit = item.unit_price if item.unit_price is not None else tot
-            qty = item.quantity if item.quantity is not None else 1
             items_payload.append({
                 "item_name": item.item_name,
-                "quantity": qty,
-                "unit_price": str(unit),
-                "total_price": str(tot),
+                "quantity": item.quantity,
+                "unit_price": str(item.unit_price) if item.unit_price is not None else None,
+                "total_price": str(item.total_price) if item.total_price is not None else None,
             })
 
         return {
             "merchant_name": merchant,
             "currency": self.currency,
-            "subtotal": str(subtotal_val),
-            "tax": str(tax_val),
-            "total": str(total_val),
+            "subtotal": str(self.subtotal) if self.subtotal is not None else None,
+            "tax": str(self.tax) if self.tax is not None else None,
+            "total": str(self.final_total) if self.final_total is not None else None,
             "items": items_payload,
         }
 
     def to_frontend_contract(self) -> dict[str, Any]:
-        """Converts canonical extraction result into Dhruv's React frontend format.
-        
-        Matches structure expected by ExtractionResult.jsx, ReceiptPreview.jsx, and ExpenseContext.jsx:
-        - status: str ('completed', 'review_required', 'failed')
-        - success: bool (False if non-receipt or rejected)
-        - is_receipt: bool
-        - rejection_reason: str | None
-        - error_code: str | None
-        - error_message: str | None
-        - merchant: str | None (never fabricated)
-        - date: str
-        - category: str
-        - currency: str | None
-        - subtotal: float
-        - tax: float
-        - tip: float
-        - discount: float
-        - total: float
-        - confidence: float
-        - missing_fields: list[str]
-        - uncertain_fields: list[str]
-        - warnings: list[str]
-        - items: list with id, name, item_name, quantity, price, unit_price, total_price
-        """
+        """Converts canonical extraction result into Dhruv's React frontend format."""
         items_payload = []
         is_valid = self.is_receipt and self.status != "failed" and bool(self.items or self.final_total is not None)
 
         if is_valid:
             for idx, item in enumerate(self.items):
-                tot = float(item.total_price) if item.total_price is not None else 0.0
-                unit = float(item.unit_price) if item.unit_price is not None else tot
+                tot = float(item.total_price) if item.total_price is not None else None
+                unit = float(item.unit_price) if item.unit_price is not None else None
+                qty = float(item.quantity) if item.quantity is not None else None
                 items_payload.append({
                     "id": f"item_{idx + 1}",
                     "name": item.item_name,
                     "item_name": item.item_name,
-                    "quantity": item.quantity or 1,
+                    "quantity": qty,
                     "price": tot,
-                    "unit_price": float(unit),
-                    "total_price": float(tot),
+                    "unit_price": unit,
+                    "total_price": tot,
                     "unit_price_str": str(item.unit_price) if item.unit_price is not None else None,
                     "total_price_str": str(item.total_price) if item.total_price is not None else None,
                 })
@@ -401,23 +417,23 @@ class ReceiptExtractionResult(BaseModel):
             "date": (self.receipt_date or "") if is_valid else "",
             "receipt_number": self.receipt_number if is_valid else None,
             "category": "Food & Dining" if is_valid else "Non-Receipt",
-            "currency": self.currency,
-            "subtotal": float(self.subtotal) if (is_valid and self.subtotal is not None) else 0.0,
-            "tax": float(self.tax) if (is_valid and self.tax is not None) else 0.0,
-            "tip": float(self.tip) if (is_valid and self.tip is not None) else 0.0,
-            "discount": float(self.discount) if (is_valid and self.discount is not None) else 0.0,
-            "total": float(self.final_total) if (is_valid and self.final_total is not None) else 0.0,
-            "final_total": float(self.final_total) if (is_valid and self.final_total is not None) else 0.0,
+            "currency": self.currency if is_valid else None,
+            "subtotal": float(self.subtotal) if (is_valid and self.subtotal is not None) else None,
+            "tax": float(self.tax) if (is_valid and self.tax is not None) else None,
+            "tip": float(self.tip) if (is_valid and self.tip is not None) else None,
+            "discount": float(self.discount) if (is_valid and self.discount is not None) else None,
+            "total": float(self.final_total) if (is_valid and self.final_total is not None) else None,
+            "final_total": float(self.final_total) if (is_valid and self.final_total is not None) else None,
             "subtotal_str": str(self.subtotal) if (is_valid and self.subtotal is not None) else None,
             "tax_str": str(self.tax) if (is_valid and self.tax is not None) else None,
             "total_str": str(self.final_total) if (is_valid and self.final_total is not None) else None,
             "final_total_str": str(self.final_total) if (is_valid and self.final_total is not None) else None,
             "confidence": self.confidence,
-            "missing_fields": self.missing_fields,
-            "uncertain_fields": self.uncertain_fields,
+            "missing_fields": list(self.missing_fields),
+            "uncertain_fields": list(self.uncertain_fields),
             "is_fallback": self.is_fallback,
             "extraction_method": self.extraction_method,
-            "warnings": self.warnings,
+            "warnings": list(self.warnings),
             "items": items_payload,
         }
 
