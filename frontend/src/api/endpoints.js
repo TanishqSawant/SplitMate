@@ -65,10 +65,14 @@ export const API_ENDPOINTS = {
   PAYMENTS: {
     CREATE_ORDER: (paymentId) =>
       `/payments/${paymentId}/create-order`,
+    CREATE_ORDER_FOR_PAYMENT: (paymentId) =>
+      `/payments/${paymentId}/create-order`,
     CAPTURE: (paymentId) =>
       `/payments/${paymentId}/capture`,
-    CAPTURE_ORDER: (paymentId) =>
+    CAPTURE_FOR_PAYMENT: (paymentId) =>
       `/payments/${paymentId}/capture`,
+    CAPTURE_ORDER: (paymentId) =>
+      paymentId ? `/payments/${paymentId}/capture` : '/payments/paypal/capture-order',
     DETAILS: (paymentId) => `/payments/${paymentId}`,
     GET: (paymentId) => `/payments/${paymentId}`,
     HISTORY: '/payments/history',

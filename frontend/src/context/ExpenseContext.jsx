@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useMemo, useEffect } from 'react';
+import React, { createContext, useContext, useState, useMemo } from 'react';
 import {
   MOCK_GROUPS,
   MOCK_EXPENSES,
@@ -14,8 +14,7 @@ import confetti from 'canvas-confetti';
 const ExpenseContext = createContext();
 
 export function ExpenseProvider({ children }) {
-  // Merge: keep both allUsers (HEAD) and isAuthenticated (origin/main)
-  const { currentUser, isAuthenticated, allUsers } = useAuth();
+  const { currentUser } = useAuth();
   const [groups, setGroups] = useState(MOCK_GROUPS);
   const [expenses, setExpenses] = useState(MOCK_EXPENSES);
   const [transactions, setTransactions] = useState(MOCK_PAYPAL_TRANSACTIONS);
@@ -24,19 +23,14 @@ export function ExpenseProvider({ children }) {
   const [error, setError] = useState(null);
 
   // Active receipt scan session
-  // Merge: HEAD has 'pending' status state; origin/main has extractionStatus, warnings, receiptId fields
   const [receiptScan, setReceiptScan] = useState({
-    status: 'idle', // 'idle' | 'uploading' | 'processing' | 'pending' | 'review' | 'error'
+    status: 'idle', // 'idle' | 'uploading' | 'processing' | 'review' | 'error'
     file: null,
     previewUrl: null,
     progress: 0,
-    receiptId: null,
-    extractionStatus: null, // 'pending' | 'processing' | 'completed' | 'review_required' | 'failed'
     extractedData: null,
     confidence: null,
-    warnings: null,
     error: null,
-    editedFields: {}, // HEAD: tracks edited fields
   });
 
   // Active PayPal settlement modal state
@@ -48,77 +42,9 @@ export function ExpenseProvider({ children }) {
     currency: 'USD',
     note: '',
     groupId: null,
-    paymentId: null,
     status: 'idle', // 'idle' | 'initiating' | 'authorizing' | 'capturing' | 'success' | 'error'
     transactionId: null,
-    error: null,
   });
-
-  // Merge: origin/main loads on isAuthenticated change; HEAD has initial data load with health check
-  // Keep origin/main's approach (simpler, more reliable) while preserving fallback to mock
-  useEffect(() => {
-    if (isAuthenticated && currentUser) {
-      loadGroupsAndExpenses();
-    }
-  }, [isAuthenticated, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Load groups and expenses from backend (origin/main)
-  const loadGroupsAndExpenses = async () => {
-    try {
-      setLoading(true);
-
-      // Load groups with members
-      const groupsResponse = await apiClient.request(API_ENDPOINTS.GROUPS.LIST);
-
-      // Load members for each group
-      const groupsWithMembers = await Promise.all(
-        groupsResponse.map(async (group) => {
-          try {
-            const members = await apiClient.request(API_ENDPOINTS.GROUPS.MEMBERS(group.id));
-            return { ...group, members };
-          } catch (err) {
-            console.error(`[SplitMate] Failed to load members for group ${group.id}:`, err);
-            return { ...group, members: [] };
-          }
-        })
-      );
-
-      setGroups(groupsWithMembers);
-      if (groupsWithMembers.length > 0 && !activeGroup) {
-        setActiveGroup(groupsWithMembers[0]);
-      }
-
-      // Load expenses
-      const expensesResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.LIST);
-      setExpenses(expensesResponse);
-
-    } catch (err) {
-      console.error('[SplitMate] Failed to load groups and expenses:', err);
-      // Fall back to mock data on error
-      setGroups(MOCK_GROUPS);
-      setExpenses(MOCK_EXPENSES);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Load expenses for the active group from backend
-  const loadGroupExpenses = async (groupId) => {
-    if (!groupId) return;
-
-    try {
-      setLoading(true);
-      const expensesResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.LIST);
-      // Filter by group on client side
-      const groupExpenses = expensesResponse.filter(exp => exp.group_id === groupId);
-      setExpenses(groupExpenses);
-    } catch (err) {
-      console.error('[SplitMate] Failed to load group expenses:', err);
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // Calculate user's overall financial summary
   const summary = useMemo(() => {
@@ -161,105 +87,59 @@ export function ExpenseProvider({ children }) {
       expense.splitDetails.forEach((split) => {
         if (split.userId === payerId || split.isPaid) return;
 
+        // split.userId owes payerId the split.share
         const debtor = split.userId;
         const creditor = payerId;
         const amount = split.share;
-        const paymentId = split.paymentId || null;
 
         const key = `${debtor}->${creditor}`;
         const reverseKey = `${creditor}->${debtor}`;
 
         if (debtsMap.has(reverseKey)) {
           const existing = debtsMap.get(reverseKey);
-          if (existing.amount >= amount) {
-            debtsMap.set(reverseKey, { ...existing, amount: existing.amount - amount });
+          if (existing >= amount) {
+            debtsMap.set(reverseKey, existing - amount);
           } else {
             debtsMap.delete(reverseKey);
-            debtsMap.set(key, { amount: amount - existing.amount, paymentId });
+            debtsMap.set(key, amount - existing);
           }
         } else {
-          const current = debtsMap.get(key) || { amount: 0, paymentId };
-          debtsMap.set(key, { amount: current.amount + amount, paymentId: paymentId || current.paymentId });
+          debtsMap.set(key, (debtsMap.get(key) || 0) + amount);
         }
       });
     });
 
     const result = [];
-    debtsMap.forEach((data, key) => {
-      const amt = data.amount;
+    debtsMap.forEach((amt, key) => {
       if (amt <= 0.01) return;
       const [debtorId, creditorId] = key.split('->');
-      const safeAllUsers = Array.isArray(allUsers) ? allUsers : [];
-      const debtor = safeAllUsers.find((u) => u.id === debtorId) || MOCK_USERS.find((u) => u.id === debtorId) || { id: debtorId, name: 'User' };
-      const creditor = safeAllUsers.find((u) => u.id === creditorId) || MOCK_USERS.find((u) => u.id === creditorId) || { id: creditorId, name: 'User' };
+      const debtor = MOCK_USERS.find((u) => u.id === debtorId) || { id: debtorId, name: 'User' };
+      const creditor = MOCK_USERS.find((u) => u.id === creditorId) || { id: creditorId, name: 'User' };
 
       result.push({
         id: key,
         debtor,
         creditor,
         amount: Number(amt.toFixed(2)),
-        paymentId: data.paymentId,
         isCurrentUserDebtor: debtorId === currentUser.id,
         isCurrentUserCreditor: creditorId === currentUser.id,
       });
     });
 
     return result;
-  }, [expenses, currentUser, allUsers]);
+  }, [expenses, currentUser]);
 
   // Create Group
   const createGroup = async (groupData) => {
     setLoading(true);
     try {
-      // 1. Create group on FastAPI backend
       const response = await apiClient.request(API_ENDPOINTS.GROUPS.CREATE, {
         method: 'POST',
-        body: JSON.stringify({ name: groupData.name }),
+        body: JSON.stringify(groupData),
       });
-
-      const newGroupId = response.id;
-
-      // 2. Add members to group on backend
-      const safeAllUsers = Array.isArray(allUsers) ? allUsers : [];
-      const memberIds = groupData.memberIds || safeAllUsers.map((u) => u.id);
-      const addedMembers = [];
-
-      for (const uId of memberIds) {
-        const userObj = safeAllUsers.find((u) => u.id === uId) || MOCK_USERS.find((u) => u.id === uId);
-        if (userObj) {
-          try {
-            const added = await apiClient.request(API_ENDPOINTS.GROUPS.ADD_MEMBER(newGroupId), {
-              method: 'POST',
-              body: JSON.stringify({
-                name: userObj.name,
-                email: userObj.email || `${userObj.id}@splitmate.io`,
-              }),
-            });
-            addedMembers.push({
-              userId: added.id,
-              name: added.name,
-              email: added.email,
-              role: 'Member',
-            });
-          } catch (e) {
-            console.warn('Could not add member to backend group:', e);
-          }
-        }
-      }
-
-      const fullGroup = {
-        ...response,
-        description: groupData.description || 'SplitMate Squad',
-        category: groupData.category || 'General',
-        currency: groupData.currency || 'USD',
-        members: addedMembers.length > 0 ? addedMembers : memberIds.map((id) => ({ userId: id, role: 'Member' })),
-        totalExpenses: 0,
-        userBalance: 0,
-      };
-
-      setGroups((prev) => [fullGroup, ...prev]);
-      setActiveGroup(fullGroup);
-      return { success: true, group: fullGroup };
+      setGroups((prev) => [response, ...prev]);
+      setActiveGroup(response);
+      return { success: true, group: response };
     } catch (err) {
       setError(err.message);
       return { success: false, error: err.message };
@@ -285,137 +165,84 @@ export function ExpenseProvider({ children }) {
     }
   };
 
-  // Start Receipt Extraction using the real backend contract:
-  //   Step 1: POST /api/receipts/upload  → returns {id, extraction_status: 'PENDING', ...}
-  //   Step 2: Poll GET /api/receipts/{id} until extraction_status === 'COMPLETED'
-  //            (Pawan's AI service calls POST /api/receipts/{id}/extraction when done)
-  //   Step 3: Map completed ReceiptResponse into extractedData state
+  // Start Receipt Extraction (Pawan's AI OCR)
   const processReceiptFile = async (file) => {
     const previewUrl = URL.createObjectURL(file);
     setReceiptScan({
       status: 'uploading',
       file,
       previewUrl,
-      progress: 15,
-      receiptId: null,
-      extractionStatus: 'pending',
+      progress: 25,
       extractedData: null,
       confidence: null,
-      warnings: null,
       error: null,
-      editedFields: {},
     });
 
     try {
-      // Step 1: Upload using multipart field name 'file' required by FastAPI
+      // Step 1: Uploading
+      await new Promise((r) => setTimeout(r, 600));
+      setReceiptScan((prev) => ({ ...prev, status: 'processing', progress: 65 }));
+
+      // Step 2: Request extraction from Pawan's endpoint
       const formData = new FormData();
+      // FastAPI's upload_receipt endpoint expects the multipart field name 'file'.
       formData.append('file', file);
 
-      // Call POST /api/receipts/extract which returns HTTP 202 with receipt_id & extraction_status
-      const initResponse = await apiClient.request(API_ENDPOINTS.RECEIPTS.EXTRACT, {
+      const uploadedReceipt = await apiClient.request(API_ENDPOINTS.RECEIPTS.UPLOAD, {
         method: 'POST',
         body: formData,
         isFormData: true,
       });
 
-      const receiptId = initResponse.receipt_id;
-      const initialStatus = initResponse.extraction_status || 'pending';
+      setReceiptScan((prev) => ({ ...prev, progress: 100 }));
+      await new Promise((r) => setTimeout(r, 400));
 
-      setReceiptScan((prev) => ({
-        ...prev,
-        status: 'processing',
-        receiptId,
-        extractionStatus: initialStatus,
-        progress: 30,
-      }));
-
-      // Step 2: Poll GET /api/receipts/{receipt_id} until completed, review_required, or failed
-      const MAX_POLL_ATTEMPTS = 35; // ~60 seconds max
-      const POLL_INTERVAL_MS = 1800;
-      let pollCount = 0;
-      let finalResult = null;
-
-      while (pollCount < MAX_POLL_ATTEMPTS) {
-        pollCount++;
-        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-
-        let res;
-        try {
-          res = await apiClient.request(API_ENDPOINTS.RECEIPTS.DETAILS(receiptId));
-        } catch (pollErr) {
-          console.warn(`[SplitMate] Receipt poll attempt ${pollCount} failed:`, pollErr);
-          if (pollCount >= MAX_POLL_ATTEMPTS) {
-            throw pollErr;
-          }
-          continue;
-        }
-
-        const currentStatus = res.extraction_status;
-
-        // Keep updating progress while pending or processing
+      // The current backend upload endpoint stores the receipt but does not run OCR.
+      // It returns extraction_status='pending' until the AI service submits results.
+      if (!uploadedReceipt.items || uploadedReceipt.items.length === 0) {
         setReceiptScan((prev) => ({
           ...prev,
-          receiptId,
-          extractionStatus: currentStatus,
-          progress: Math.min(92, 30 + Math.floor((pollCount / MAX_POLL_ATTEMPTS) * 60)),
+          status: 'error',
+          receiptId: uploadedReceipt.id,
+          error: 'Receipt uploaded successfully, but AI extraction is not connected to the backend yet.',
         }));
-
-        if (currentStatus === 'completed' || currentStatus === 'review_required') {
-          finalResult = res;
-          break;
-        } else if (currentStatus === 'failed') {
-          throw new Error(res.error_message || res.error_code || 'Receipt extraction failed. Please try a clearer receipt image.');
-        }
-        // If pending or processing, continue polling without treating as error
+        return;
       }
 
-      if (!finalResult) {
-        throw new Error('Receipt extraction timed out while waiting for AI analysis. Please try again.');
-      }
-
-      // Step 3: Map line items preserving null values (do not fabricate defaults)
-      const defaultMembers = activeGroup?.members?.map((m) => m.userId) || [currentUser?.id].filter(Boolean);
-      const itemsWithAssignments = (finalResult.items || []).map((item) => ({
-        id: item.id,
-        name: item.item_name || 'Item',
-        quantity: item.quantity != null ? Number(item.quantity) : null,
-        unit_price: item.unit_price != null ? Number(item.unit_price) : null,
-        price: item.total_price != null ? Number(item.total_price) : null,
-        assignedTo: [...defaultMembers],
-      }));
-
-      const extractedData = {
-        receiptId: finalResult.receipt_id,
-        merchant: finalResult.merchant_name != null ? finalResult.merchant_name : null,
-        currency: finalResult.currency != null ? finalResult.currency : null,
-        subtotal: finalResult.subtotal != null ? Number(finalResult.subtotal) : null,
-        tax: finalResult.tax != null ? Number(finalResult.tax) : null,
-        tip: null,
-        total: finalResult.total != null ? Number(finalResult.total) : null,
-        confidence: finalResult.confidence != null ? finalResult.confidence : null,
-        warnings: finalResult.warnings || null,
-        missingFields: finalResult.missing_fields || null,
-        uncertainFields: finalResult.uncertain_fields || null,
-        extractionStatus: finalResult.extraction_status,
-        isUserReviewed: finalResult.is_user_reviewed || false,
-        items: itemsWithAssignments,
+      const extraction = {
+        merchant: uploadedReceipt.merchant_name,
+        currency: uploadedReceipt.currency,
+        subtotal: uploadedReceipt.subtotal,
+        tax: uploadedReceipt.tax,
+        total: uploadedReceipt.total,
+        items: uploadedReceipt.items.map((item) => ({
+          id: item.id,
+          name: item.item_name,
+          quantity: item.quantity,
+          price: item.total_price,
+        })),
       };
+
+      // Items default assignment: assign each to all members of activeGroup or currentUser
+      const defaultMembers = activeGroup?.members?.map((m) => m.userId) || [currentUser.id];
+      const itemsWithAssignments = (extraction.items || []).map((item) => ({
+        ...item,
+        assignedTo: item.assignedTo || [...defaultMembers],
+      }));
 
       setReceiptScan({
         status: 'review',
         file,
         previewUrl,
         progress: 100,
-        receiptId: finalResult.receipt_id,
-        extractionStatus: finalResult.extraction_status,
-        extractedData,
-        confidence: finalResult.confidence != null ? finalResult.confidence : null,
-        warnings: finalResult.warnings || null,
+        extractedData: {
+          ...extraction,
+          items: itemsWithAssignments,
+        },
+        confidence: extraction.confidence || 0.95,
         error: null,
-        editedFields: {},
       });
     } catch (err) {
-      console.error('[SplitMate] Receipt extraction failed:', err);
       setReceiptScan((prev) => ({
         ...prev,
         status: 'error',
@@ -424,96 +251,7 @@ export function ExpenseProvider({ children }) {
     }
   };
 
-  // Submit human-reviewed corrections for a receipt in review_required status (origin/main)
-  const submitReceiptReview = async (customData) => {
-    if (!receiptScan.receiptId || !receiptScan.extractedData) return;
-    const current = customData || receiptScan.extractedData;
-
-    const currency = (current.currency || '').trim().toUpperCase();
-    if (!currency || currency.length !== 3) {
-      throw new Error("Valid 3-letter currency code (e.g. USD, EUR, INR) is required for review.");
-    }
-    if (current.total == null || isNaN(Number(current.total)) || Number(current.total) <= 0) {
-      throw new Error("A positive total is required for review.");
-    }
-    if (!current.items || current.items.length === 0) {
-      throw new Error("At least one line item is required for review.");
-    }
-
-    const payload = {
-      merchant_name: current.merchant || null,
-      currency,
-      subtotal: current.subtotal != null ? Number(current.subtotal) : null,
-      tax: current.tax != null ? Number(current.tax) : null,
-      total: Number(current.total),
-      items: current.items.map((it, idx) => {
-        const qty = it.quantity != null && Number(it.quantity) > 0 ? Number(it.quantity) : 1;
-        const tot = it.price != null && Number(it.price) >= 0 ? Number(it.price) : 0;
-        let unit = it.unit_price != null && Number(it.unit_price) >= 0 ? Number(it.unit_price) : 0;
-        if (Math.abs(qty * unit - tot) > 0.009) {
-          unit = Number((tot / qty).toFixed(2));
-        }
-        return {
-          item_name: it.name || `Item ${idx + 1}`,
-          quantity: qty,
-          unit_price: unit,
-          total_price: Number((qty * unit).toFixed(2)),
-        };
-      }),
-    };
-
-    const res = await apiClient.request(API_ENDPOINTS.RECEIPTS.REVIEW(receiptScan.receiptId), {
-      method: 'PUT',
-      body: JSON.stringify(payload),
-    });
-
-    setReceiptScan((prev) => {
-      if (!prev.extractedData) return prev;
-      return {
-        ...prev,
-        extractionStatus: res.extraction_status,
-        warnings: res.warnings || null,
-        extractedData: {
-          ...prev.extractedData,
-          merchant: res.merchant_name,
-          currency: res.currency,
-          subtotal: res.subtotal != null ? Number(res.subtotal) : null,
-          tax: res.tax != null ? Number(res.tax) : null,
-          total: res.total != null ? Number(res.total) : null,
-          extractionStatus: res.extraction_status,
-          isUserReviewed: res.is_user_reviewed,
-        },
-      };
-    });
-
-    return res;
-  };
-
-  // Reset Receipt Scan State cleanly (HEAD version — revokes blob URL)
-  const resetReceiptScan = () => {
-    if (receiptScan.previewUrl && receiptScan.previewUrl.startsWith('blob:')) {
-      try {
-        URL.revokeObjectURL(receiptScan.previewUrl);
-      } catch {
-        // ignore revoke error
-      }
-    }
-    setReceiptScan({
-      status: 'idle',
-      file: null,
-      previewUrl: null,
-      progress: 0,
-      receiptId: null,
-      extractionStatus: null,
-      extractedData: null,
-      confidence: null,
-      warnings: null,
-      error: null,
-      editedFields: {},
-    });
-  };
-
-  // Load Sample Receipt for one-click demo (HEAD)
+  // Load Sample Receipt for one-click demo
   const loadSampleReceipt = (sampleId) => {
     const sample = MOCK_SAMPLE_RECEIPTS.find((s) => s.id === sampleId) || MOCK_SAMPLE_RECEIPTS[0];
     setReceiptScan({
@@ -521,8 +259,6 @@ export function ExpenseProvider({ children }) {
       file: null,
       previewUrl: sample.image,
       progress: 100,
-      receiptId: null,
-      extractionStatus: 'completed',
       extractedData: {
         merchant: sample.merchant,
         date: sample.date,
@@ -536,9 +272,7 @@ export function ExpenseProvider({ children }) {
         items: JSON.parse(JSON.stringify(sample.items)),
       },
       confidence: sample.confidence,
-      warnings: null,
       error: null,
-      editedFields: {},
     });
   };
 
@@ -568,7 +302,6 @@ export function ExpenseProvider({ children }) {
       if (!prev.extractedData) return prev;
       return {
         ...prev,
-        editedFields: { ...prev.editedFields, [field]: true },
         extractedData: {
           ...prev.extractedData,
           [field]: value,
@@ -577,196 +310,116 @@ export function ExpenseProvider({ children }) {
     });
   };
 
-  // Update a single extracted item field (HEAD: updateExtractedItem)
-  const updateExtractedItem = (itemId, field, value) => {
-    setReceiptScan((prev) => {
-      if (!prev.extractedData) return prev;
-      const updatedItems = prev.extractedData.items.map((item) => {
-        if (item.id === itemId) {
-          return { ...item, [field]: value };
-        }
-        return item;
-      });
-      return {
-        ...prev,
-        editedFields: { ...prev.editedFields, [`item_${itemId}_${field}`]: true },
-        extractedData: {
-          ...prev.extractedData,
-          items: updatedItems,
-        },
-      };
-    });
-  };
-
-  // Finalize receipt scan into an expense with real backend persistence (origin/main)
+  // Finalize receipt scan into an expense
   const finalizeReceiptScan = async (targetGroupId, paidByUserId) => {
-    if (!receiptScan.extractedData || !receiptScan.receiptId) {
-      throw new Error('No receipt data available to finalize');
-    }
-
-    // Gate: Do not allow payment initialization until extraction is completed
-    if (receiptScan.extractionStatus !== 'completed') {
-      throw new Error(
-        `Receipt extraction status is '${receiptScan.extractionStatus}'. Human review must be completed before splitting or initializing payments.`
-      );
-    }
+    if (!receiptScan.extractedData) return;
 
     const data = receiptScan.extractedData;
     const targetGroup = groups.find((g) => g.id === targetGroupId) || activeGroup;
+    const groupMemberIds = targetGroup?.members?.map((m) => m.userId) || [currentUser.id];
 
-    if (!targetGroup || !targetGroup.members || targetGroup.members.length === 0) {
-      throw new Error('Target group must have at least one member');
+    // Compute shares based on item assignments + tax/tip proportional split
+    const userShares = {};
+    groupMemberIds.forEach((id) => (userShares[id] = 0));
+
+    let itemsTotal = 0;
+    data.items.forEach((item) => {
+      itemsTotal += item.price;
+      const assigned = item.assignedTo && item.assignedTo.length > 0 ? item.assignedTo : groupMemberIds;
+      const sharePerUser = item.price / assigned.length;
+      assigned.forEach((uId) => {
+        userShares[uId] = (userShares[uId] || 0) + sharePerUser;
+      });
+    });
+
+    // Pro-rate tax and tip based on items share
+    const extraCharges = (data.tax || 0) + (data.tip || 0);
+    if (extraCharges > 0 && itemsTotal > 0) {
+      groupMemberIds.forEach((uId) => {
+        const userItemRatio = (userShares[uId] || 0) / itemsTotal;
+        userShares[uId] = (userShares[uId] || 0) + extraCharges * userItemRatio;
+      });
     }
 
-    // Check if expense already exists for this receipt
-    const existingExpense = expenses.find(exp => exp.receipt_id === receiptScan.receiptId || exp.receiptId === receiptScan.receiptId);
-    if (existingExpense) {
-      console.log('[SplitMate] Expense already exists for this receipt:', existingExpense.id);
-      setReceiptScan({
-        status: 'idle',
-        file: null,
-        previewUrl: null,
-        progress: 0,
-        receiptId: null,
-        extractionStatus: null,
-        extractedData: null,
-        confidence: null,
-        warnings: null,
-        error: null,
-        editedFields: {},
-      });
-      confetti({
-        particleCount: 80,
-        spread: 60,
-        origin: { y: 0.6 },
-      });
-      return existingExpense;
-    }
+    const splitDetails = groupMemberIds.map((uId) => ({
+      userId: uId,
+      share: Number((userShares[uId] || 0).toFixed(2)),
+      isPaid: uId === paidByUserId,
+    }));
 
-    setLoading(true);
-    try {
-      // Step 1: Create expense linked to receipt
-      const expensePayload = {
-        group_id: targetGroupId,
-        receipt_id: receiptScan.receiptId,
-        total_amount: Number(data.total),
-        currency: data.currency || 'USD',
-      };
+    const newExpense = {
+      id: `exp_${Date.now()}`,
+      groupId: targetGroupId,
+      description: `${data.merchant} (AI Receipt Split)`,
+      amount: data.total,
+      currency: data.currency || 'USD',
+      category: data.category || 'Food & Dining',
+      paidBy: paidByUserId || currentUser.id,
+      date: data.date || new Date().toISOString().split('T')[0],
+      receiptId: `rcpt_${Date.now()}`,
+      splitType: 'ITEMIZED',
+      splitDetails,
+    };
 
-      const expenseResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.CREATE, {
-        method: 'POST',
-        body: JSON.stringify(expensePayload),
-      });
+    setExpenses((prev) => [newExpense, ...prev]);
 
-      const expenseId = expenseResponse.id;
+    // Reset scan state
+    setReceiptScan({
+      status: 'idle',
+      file: null,
+      previewUrl: null,
+      progress: 0,
+      extractedData: null,
+      confidence: null,
+      error: null,
+    });
 
-      // Step 2: Build assignment batch from item assignments
-      // Map frontend user IDs to backend member IDs
-      const userIdToMemberId = {};
-      targetGroup.members.forEach((member) => {
-        const uid = member.userId || member.user_id;
-        if (uid) {
-          userIdToMemberId[uid] = member.id;
-        }
-      });
+    confetti({
+      particleCount: 80,
+      spread: 70,
+      origin: { y: 0.6 }
+    });
 
-      // For each receipt item, create assignments for each assigned user
-      const assignments = [];
-      data.items.forEach((item) => {
-        const assignedUserIds = item.assignedTo || [];
-        if (assignedUserIds.length === 0) {
-          throw new Error(`Item "${item.name}" has no assignments`);
-        }
-
-        // Calculate share quantity per user (split equally among assigned users)
-        const itemQuantity = item.quantity != null ? Number(item.quantity) : 1;
-        const sharePerUser = itemQuantity / assignedUserIds.length;
-
-        assignedUserIds.forEach((userId) => {
-          const memberId = userIdToMemberId[userId];
-          if (!memberId) {
-            throw new Error(`User ${userId} is not a member of the target group`);
-          }
-
-          assignments.push({
-            receipt_item_id: item.id,
-            member_id: memberId,
-            share_quantity: Number(sharePerUser.toFixed(4)),
-          });
-        });
-      });
-
-      // Step 3: Submit assignments to backend
-      await apiClient.request(API_ENDPOINTS.EXPENSES.ASSIGN(expenseId), {
-        method: 'POST',
-        body: JSON.stringify({ assignments }),
-      });
-
-      // Step 4: Fetch calculated splits from backend
-      const splitsResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.SPLITS(expenseId));
-
-      // Step 5: Initialize payments
-      const paymentsResponse = await apiClient.request(
-        API_ENDPOINTS.EXPENSES.INITIALIZE_PAYMENTS(expenseId),
-        {
-          method: 'POST',
-        }
-      );
-
-      // Step 6: Update local state with backend response
-      const newExpense = {
-        id: expenseResponse.id,
-        groupId: expenseResponse.group_id,
-        receiptId: expenseResponse.receipt_id,
-        receipt_id: expenseResponse.receipt_id,
-        description: `${data.merchant || 'Receipt'} (AI Receipt Split)`,
-        amount: expenseResponse.total_amount,
-        currency: expenseResponse.currency,
-        date: new Date(expenseResponse.created_at).toISOString().split('T')[0],
-        paidBy: paidByUserId,
-        splitType: 'ITEMIZED',
-        splitDetails: splitsResponse.splits.map((split) => ({
-          userId: split.member_id,
-          userName: split.member_name,
-          userEmail: split.member_email,
-          share: Number(split.amount),
-          isPaid: false,
-        })),
-        payments: paymentsResponse,
-      };
-
-      setExpenses((prev) => [newExpense, ...prev]);
-
-      // Reset scan state cleanly
-      resetReceiptScan();
-
-      confetti({
-        particleCount: 120,
-        spread: 80,
-        origin: { y: 0.6 },
-      });
-
-      return newExpense;
-    } catch (err) {
-      console.error('[SplitMate] Expense finalization failed:', err);
-      setError(err.message || 'Failed to create expense');
-      throw err;
-    } finally {
-      setLoading(false);
-    }
+    return newExpense;
   };
 
   // Open PayPal Payment Modal for a debt
-  const openPayPalPayment = ({ creditor, debtor, amount, note, groupId, paymentId }) => {
+  const openPayPalPayment = async ({
+    creditor,
+    debtor,
+    amount,
+    note,
+    groupId,
+    expenseId,
+    paymentId,
+    payerMemberId,
+  }) => {
+    let resolvedPaymentId = paymentId || null;
+
+    // If expenseId provided but no paymentId, initialize payments with backend
+    if (expenseId && !resolvedPaymentId) {
+      const initResult = await initializeExpensePayments(expenseId);
+      if (initResult.success && Array.isArray(initResult.payments)) {
+        const myPayment = initResult.payments.find(
+          (p) => p.member_id === (payerMemberId || debtor?.id || currentUser?.id)
+        ) || initResult.payments[0];
+        if (myPayment) {
+          resolvedPaymentId = myPayment.id;
+        }
+      }
+    }
+
     setPayPalModal({
       isOpen: true,
       payer: debtor || currentUser,
       receiver: creditor,
       amount,
       currency: 'USD',
-      note: note || `Settle balance with ${creditor.name}`,
+      note: note || `Settle debt with ${creditor?.name || 'creditor'}`,
       groupId,
-      paymentId: paymentId || null,
+      expenseId: expenseId || null,
+      paymentId: resolvedPaymentId,
+      payerMemberId: payerMemberId || null,
       status: 'idle',
       transactionId: null,
       error: null,
@@ -777,104 +430,144 @@ export function ExpenseProvider({ children }) {
     setPayPalModal((prev) => ({ ...prev, isOpen: false, status: 'idle', error: null }));
   };
 
-<<<<<<< HEAD
-  // Execute PayPal Payment Flow
-  // Merge: HEAD has resilient mock fallback; origin/main has approval_url support and real capture endpoint
-  const executePayPalPayment = async (paymentId) => {
-    const resolvedPaymentId = paymentId || payPalModal.paymentId;
-
-    setPayPalModal((prev) => ({ ...prev, status: 'initiating', error: null }));
-
-=======
   // Fetch real payment history from backend (Tanay's GET /api/payments/history)
   const fetchPaymentHistory = async () => {
->>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
     try {
-      let captureId = null;
-      let orderId = null;
-      let captureResponse = null;
+      const payments = await apiClient.request(API_ENDPOINTS.PAYMENTS.HISTORY, {
+        method: 'GET',
+      });
+      if (Array.isArray(payments)) {
+        const normalized = payments.map((p) => ({
+          id: p.id,
+          orderId: p.paypal_order_id,
+          captureId: p.paypal_capture_id || p.id,
+          payerId: p.member_id,
+          payerName: p.member_id ? `Member (${String(p.member_id).substring(0, 8)})` : 'Squad Member',
+          receiverName: 'SplitMate Group',
+          amount: parseFloat(p.amount) || 0,
+          currency: p.currency || 'USD',
+          date: p.updated_at || p.created_at,
+          status: (p.status || '').toUpperCase(),
+          raw: p,
+        }));
+        setTransactions(normalized);
+        return { success: true, transactions: normalized };
+      }
+    } catch (err) {
+      console.warn('[SplitMate] Failed to fetch payment history from backend:', err.message);
+    }
+  };
 
-      const isRealUUID = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+  // Fetch payment history on mount and when currentUser changes
+  useEffect(() => {
+    fetchPaymentHistory();
+  }, [currentUser]);
 
-      if (resolvedPaymentId && isRealUUID(resolvedPaymentId)) {
-        // Step 1: Create PayPal Order
-        const orderResponse = await apiClient.request(
-          API_ENDPOINTS.PAYMENTS.CREATE_ORDER(resolvedPaymentId),
+  // Initialize expense payments after splits are finalized (POST /api/expenses/{expense_id}/initialize-payments)
+  const initializeExpensePayments = async (expenseId) => {
+    if (!expenseId) return { success: false, error: 'No expense ID provided' };
+    try {
+      const payments = await apiClient.request(
+        API_ENDPOINTS.EXPENSES.INITIALIZE_PAYMENTS(expenseId),
+        { method: 'POST' }
+      );
+      return { success: true, payments };
+    } catch (err) {
+      console.warn(`[SplitMate] initialize-payments failed for ${expenseId}:`, err.message);
+      return { success: false, error: err.message };
+    }
+  };
+
+  // Step 1: Create PayPal Order via FastAPI backend
+  const createPayPalOrder = async () => {
+    setPayPalModal((prev) => ({ ...prev, status: 'initiating', error: null }));
+    try {
+      let response;
+      if (payPalModal.paymentId) {
+        response = await apiClient.request(
+          API_ENDPOINTS.PAYMENTS.CREATE_ORDER(payPalModal.paymentId),
           {
             method: 'POST',
             body: JSON.stringify({
-              return_url: window.location.href,
-              cancel_url: window.location.href,
+              return_url: `${window.location.origin}/payment/success`,
+              cancel_url: `${window.location.origin}/payment/cancel`,
             }),
           }
         );
-
-        orderId = orderResponse.paypal_order_id;
-
-        // If we get an approval URL, open it in a new tab
-        if (orderResponse.approval_url) {
-          window.open(orderResponse.approval_url, '_blank');
-        }
-
-        setPayPalModal((prev) => ({ ...prev, status: 'authorizing' }));
-
-        // Wait for user to complete PayPal checkout
-        await new Promise((r) => setTimeout(r, 1000));
-
-        // Step 2: Capture Order
-        setPayPalModal((prev) => ({ ...prev, status: 'capturing' }));
-        captureResponse = await apiClient.request(
-          API_ENDPOINTS.PAYMENTS.CAPTURE(resolvedPaymentId),
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              paypal_order_id: orderId,
-            }),
-          }
-        );
-
-        captureId = captureResponse.paypal_capture_id || orderId;
       } else {
-        // Resilient sandbox flow for mock debts (HEAD fallback)
-        setPayPalModal((prev) => ({ ...prev, status: 'authorizing' }));
-        await new Promise((r) => setTimeout(r, 500));
-        orderId = `MOCK-ORD-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
-
-        setPayPalModal((prev) => ({ ...prev, status: 'capturing' }));
-        await new Promise((r) => setTimeout(r, 600));
-        captureId = `MOCK-CAP-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
-        captureResponse = {
-          paypal_capture_id: captureId,
-          amount: payPalModal.amount,
-          currency: payPalModal.currency,
-          status: 'COMPLETED',
-        };
+        response = await apiClient.request(API_ENDPOINTS.PAYMENTS.PAYPAL_CREATE_DIRECT, {
+          method: 'POST',
+          body: JSON.stringify({
+            paymentId: payPalModal.paymentId,
+            payerId: payPalModal.payerMemberId || payPalModal.payer?.id,
+            expenseId: payPalModal.expenseId,
+            receiverEmail: payPalModal.receiver?.paypalEmail,
+            note: payPalModal.note,
+          }),
+        });
       }
 
-      // Step 3: Record transaction in state
-      const newTxn = {
-        id: `txn_pp_${Date.now()}`,
+      // Backend returns PaymentResponse with paypal_order_id
+      const orderId = response.paypal_order_id || response.orderId || response.id;
+      if (!orderId) {
+        throw new Error('PayPal order created but no order ID returned from backend.');
+      }
+
+      setPayPalModal((prev) => ({
+        ...prev,
+        status: 'authorizing',
         orderId,
-        captureId,
-        payerId: payPalModal.payer?.id,
-        payerName: payPalModal.payer?.name,
-        receiverId: payPalModal.receiver?.id,
-        receiverName: payPalModal.receiver?.name,
-        receiverEmail: payPalModal.receiver?.paypalEmail || `${(payPalModal.receiver?.name || 'user').toLowerCase()}@sandbox.paypal.com`,
-        amount: captureResponse.amount || payPalModal.amount,
-        currency: captureResponse.currency || payPalModal.currency,
-        date: new Date().toISOString(),
-        status: captureResponse.status || 'COMPLETED',
-        note: payPalModal.note,
-        method: 'PayPal Sandbox Checkout',
-      };
+        paymentId: response.id || prev.paymentId,
+      }));
 
-      setTransactions((prev) => [newTxn, ...prev]);
+      return orderId;
+    } catch (err) {
+      setPayPalModal((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err.detail || err.message || 'Failed to create PayPal order.',
+      }));
+      throw err;
+    }
+  };
 
-      // Mark split as paid
+  // Step 2: Capture PayPal Order via FastAPI backend upon genuine onApprove
+  const capturePayPalOrder = async (orderId) => {
+    setPayPalModal((prev) => ({ ...prev, status: 'capturing', error: null }));
+    try {
+      const activeOrderId = orderId || payPalModal.orderId;
+      let response;
+
+      if (payPalModal.paymentId) {
+        response = await apiClient.request(
+          API_ENDPOINTS.PAYMENTS.CAPTURE(payPalModal.paymentId),
+          {
+            method: 'POST',
+            body: JSON.stringify({ paypal_order_id: activeOrderId }),
+          }
+        );
+      } else {
+        response = await apiClient.request(API_ENDPOINTS.PAYMENTS.PAYPAL_CAPTURE_DIRECT, {
+          method: 'POST',
+          body: JSON.stringify({
+            orderId: activeOrderId,
+            paymentId: payPalModal.paymentId,
+            payerId: payPalModal.payerMemberId || payPalModal.payer?.id,
+          }),
+        });
+      }
+
+      const captureStatus = (response.status || '').toLowerCase();
+      if (captureStatus !== 'captured' && captureStatus !== 'completed') {
+        throw new Error(`Unexpected capture status: ${response.status}. Please check payment history.`);
+      }
+
+      const captureId = response.paypal_capture_id || response.captureId || activeOrderId;
+
+      // Mark matching debts as settled in expenses state
       setExpenses((prevExpenses) =>
         prevExpenses.map((exp) => {
-          if (exp.paidBy === payPalModal.receiver?.id) {
+          if (exp.paidBy === payPalModal.receiver?.id || exp.id === payPalModal.expenseId) {
             return {
               ...exp,
               splitDetails: (exp.splitDetails || []).map((detail) => {
@@ -889,30 +582,42 @@ export function ExpenseProvider({ children }) {
         })
       );
 
+      // Refresh payment history from real backend
+      await fetchPaymentHistory();
+
       setPayPalModal((prev) => ({
         ...prev,
         status: 'success',
         transactionId: captureId,
       }));
 
+      // Fire celebratory confetti!
       confetti({
         particleCount: 120,
         spread: 80,
         origin: { y: 0.6 },
       });
 
-      return { success: true, captureId };
+      return { success: true, captureId, response };
     } catch (err) {
-      console.error('[SplitMate] PayPal payment failed:', err);
       setPayPalModal((prev) => ({
         ...prev,
         status: 'error',
-        error: err.message || 'Payment processing failed. Please retry.',
+        error: err.detail || err.message || 'Payment capture failed.',
       }));
-      return { success: false, error: err.message };
+      throw err;
     }
   };
 
+  // Programmatic / fallback payment execution
+  const executePayPalPayment = async () => {
+    try {
+      const orderId = await createPayPalOrder();
+      return await capturePayPalOrder(orderId);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  };
 
   return (
     <ExpenseContext.Provider
@@ -927,23 +632,21 @@ export function ExpenseProvider({ children }) {
         summary,
         debtBreakdown,
         receiptScan,
-        setReceiptScan,
-        resetReceiptScan,
         payPalModal,
         createGroup,
         addExpense,
-        loadGroupExpenses,
-        loadGroupsAndExpenses,
         processReceiptFile,
-        submitReceiptReview,
         loadSampleReceipt,
         updateItemAssignment,
-        updateExtractedItem,
         updateReceiptMetadata,
         finalizeReceiptScan,
         openPayPalPayment,
         closePayPalModal,
         executePayPalPayment,
+        createPayPalOrder,
+        capturePayPalOrder,
+        initializeExpensePayments,
+        fetchPaymentHistory,
       }}
     >
       {children}
