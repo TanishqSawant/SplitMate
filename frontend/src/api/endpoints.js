@@ -33,6 +33,7 @@ export const API_ENDPOINTS = {
     DETAILS: (expenseId) => `/expenses/${expenseId}`,
     DELETE: (expenseId) => `/expenses/${expenseId}`,
     SETTLE: '/expenses/settle',
+    INITIALIZE_PAYMENTS: (expenseId) => `/expenses/${expenseId}/initialize-payments`,
   },
 
   // AI Receipt Extraction (Pawan)
@@ -46,6 +47,9 @@ export const API_ENDPOINTS = {
   PAYMENTS: {
     CREATE_ORDER: '/payments/paypal/create-order',
     CAPTURE_ORDER: '/payments/paypal/capture-order',
+    CREATE_ORDER_FOR_PAYMENT: (paymentId) => `/payments/${paymentId}/create-order`,
+    CAPTURE_FOR_PAYMENT: (paymentId) => `/payments/${paymentId}/capture`,
+    GET_PAYMENT: (paymentId) => `/payments/${paymentId}`,
     HISTORY: '/payments/history',
   },
 

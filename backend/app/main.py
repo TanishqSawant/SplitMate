@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import expenses, groups, health, payments, receipts
+from app.api.routes import auth, expenses, groups, health, payments, receipts
 from app.core.config import settings
 
 app = FastAPI(
@@ -27,6 +27,7 @@ app.add_middleware(
 # Routers
 # ---------------------------------------------------------------------------
 app.include_router(health.router)
+app.include_router(auth.router)
 app.include_router(receipts.router)
 app.include_router(groups.router)
 app.include_router(expenses.router)

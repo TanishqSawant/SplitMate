@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { PayPalButtons } from '@paypal/react-paypal-js';
 import {
   CreditCard,
   ShieldCheck,
@@ -16,8 +17,15 @@ import Button from '../common/Button';
 import Badge from '../common/Badge';
 
 export default function PayPalPaymentModal() {
-  const { payPalModal, closePayPalModal, executePayPalPayment } = useExpenses();
+  const {
+    payPalModal,
+    closePayPalModal,
+    createPayPalOrder,
+    capturePayPalOrder,
+    executePayPalPayment,
+  } = useExpenses();
   const [copied, setCopied] = useState(false);
+  const [sdkErrorMessage, setSdkErrorMessage] = useState(null);
 
   if (!payPalModal.isOpen) return null;
 
@@ -100,17 +108,60 @@ export default function PayPalPaymentModal() {
               </div>
             </div>
 
-            {/* Yellow PayPal Branded Button */}
-            <button
-              onClick={executePayPalPayment}
-              className="w-full py-3.5 px-6 rounded-2xl bg-[#FFC439] hover:bg-[#F2BA36] text-[#003087] font-black text-base shadow-md hover:shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <span>Pay with</span>
-              <span className="italic font-extrabold text-lg tracking-tight">PayPal</span>
-            </button>
+            {/* Error badge if SDK or createOrder fails */}
+            {(sdkErrorMessage || error) && (
+              <div className="p-3 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 text-xs rounded-xl border border-rose-200 dark:border-rose-900 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{sdkErrorMessage || error}</span>
+              </div>
+            )}
+
+            {/* Official PayPal SDK Buttons */}
+            <div className="paypal-buttons-wrapper min-h-[48px] relative z-0">
+              <PayPalButtons
+                style={{
+                  layout: 'vertical',
+                  shape: 'rect',
+                  color: 'gold',
+                  label: 'paypal',
+                  height: 46,
+                }}
+                disabled={status !== 'idle'}
+                createOrder={async () => {
+                  setSdkErrorMessage(null);
+                  try {
+                    const orderId = await createPayPalOrder();
+                    return orderId;
+                  } catch (err) {
+                    const msg = err.detail || err.message || 'Failed to initiate PayPal order.';
+                    setSdkErrorMessage(msg);
+                    throw err;
+                  }
+                }}
+                onApprove={async (data) => {
+                  setSdkErrorMessage(null);
+                  try {
+                    await capturePayPalOrder(data.orderID);
+                  } catch (err) {
+                    const msg = err.detail || err.message || 'Payment capture failed.';
+                    setSdkErrorMessage(msg);
+                  }
+                }}
+                onCancel={(data) => {
+                  console.info('[PayPal SDK] Checkout cancelled by buyer:', data);
+                  setSdkErrorMessage('Checkout was cancelled. No funds were captured.');
+                }}
+                onError={(err) => {
+                  console.error('[PayPal SDK] Checkout error:', err);
+                  setSdkErrorMessage(
+                    err?.message || 'PayPal Sandbox encountered an error. Please verify Sandbox credentials and try again.'
+                  );
+                }}
+              />
+            </div>
 
             <p className="text-[11px] text-center text-slate-400">
-              Payments are routed via Tanay's FastAPI Sandbox integration endpoints.
+              Securely processed via PayPal Sandbox Orders v2 & FastAPI server-side capture.
             </p>
           </div>
         )}

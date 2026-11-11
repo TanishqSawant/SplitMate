@@ -10,7 +10,12 @@ export function AuthProvider({ children }) {
     const saved = localStorage.getItem('splitmate_auth_user');
     return saved ? JSON.parse(saved) : MOCK_USERS[0];
   });
-  const [isAuthenticated, setIsAuthenticated] = useState(true);
+  const [token, setToken] = useState(() => {
+    return localStorage.getItem('splitmate_token') || null;
+  });
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return Boolean(localStorage.getItem('splitmate_token') || localStorage.getItem('splitmate_auth_user'));
+  });
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -20,6 +25,16 @@ export function AuthProvider({ children }) {
       localStorage.removeItem('splitmate_auth_user');
     }
   }, [currentUser]);
+
+  useEffect(() => {
+    if (token) {
+      localStorage.setItem('splitmate_token', token);
+      apiClient.setAuthToken(token);
+    } else {
+      localStorage.removeItem('splitmate_token');
+      apiClient.setAuthToken(null);
+    }
+  }, [token]);
 
   // Demo user quick-switch (essential for hackathon team demonstration)
   const switchUser = (userId) => {
@@ -37,7 +52,14 @@ export function AuthProvider({ children }) {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       });
-      const user = MOCK_USERS.find((u) => u.email === email) || {
+
+      if (result.access_token) {
+        setToken(result.access_token);
+        localStorage.setItem('splitmate_token', result.access_token);
+        apiClient.setAuthToken(result.access_token);
+      }
+
+      const user = result.user || MOCK_USERS.find((u) => u.email === email) || {
         id: `usr_${Date.now()}`,
         name: email.split('@')[0],
         email,
@@ -47,7 +69,7 @@ export function AuthProvider({ children }) {
       };
       setCurrentUser(user);
       setIsAuthenticated(true);
-      return { success: true, user };
+      return { success: true, user, token: result.access_token };
     } catch (err) {
       return { success: false, error: err.message };
     } finally {
@@ -58,7 +80,22 @@ export function AuthProvider({ children }) {
   const register = async (userData) => {
     setIsLoading(true);
     try {
-      const newUser = {
+      const result = await apiClient.request(API_ENDPOINTS.AUTH.REGISTER, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: userData.name,
+          email: userData.email,
+          password: userData.password,
+        }),
+      });
+
+      if (result.access_token) {
+        setToken(result.access_token);
+        localStorage.setItem('splitmate_token', result.access_token);
+        apiClient.setAuthToken(result.access_token);
+      }
+
+      const user = result.user || {
         id: `usr_${Date.now()}`,
         name: userData.name,
         email: userData.email,
@@ -66,9 +103,9 @@ export function AuthProvider({ children }) {
         paypalEmail: userData.paypalEmail || `${userData.email.split('@')[0]}@sandbox.paypal.com`,
         role: 'Team Member',
       };
-      setCurrentUser(newUser);
+      setCurrentUser(user);
       setIsAuthenticated(true);
-      return { success: true, user: newUser };
+      return { success: true, user, token: result.access_token };
     } catch (err) {
       return { success: false, error: err.message };
     } finally {
@@ -78,6 +115,10 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     setCurrentUser(null);
+    setToken(null);
+    localStorage.removeItem('splitmate_auth_user');
+    localStorage.removeItem('splitmate_token');
+    apiClient.setAuthToken(null);
     setIsAuthenticated(false);
   };
 
@@ -89,6 +130,7 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider
       value={{
         currentUser,
+        token,
         isAuthenticated,
         isLoading,
         allUsers: MOCK_USERS,

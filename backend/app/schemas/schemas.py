@@ -17,6 +17,38 @@ class HealthResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# User & Authentication
+# ---------------------------------------------------------------------------
+
+class UserRegister(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["Tanishq"])
+    email: EmailStr = Field(..., examples=["tanishq@example.com"])
+    password: str = Field(
+        ..., min_length=8, max_length=128, description="Password must be at least 8 characters"
+    )
+
+
+class UserLogin(BaseModel):
+    email: EmailStr = Field(..., examples=["tanishq@example.com"])
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class UserResponse(BaseModel):
+    id: UUID
+    name: str
+    email: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+# ---------------------------------------------------------------------------
 # ExpenseGroup
 # ---------------------------------------------------------------------------
 
@@ -27,6 +59,7 @@ class GroupCreate(BaseModel):
 class GroupResponse(BaseModel):
     id: UUID
     name: str
+    creator_id: UUID | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -44,6 +77,7 @@ class MemberCreate(BaseModel):
 class MemberResponse(BaseModel):
     id: UUID
     group_id: UUID
+    user_id: UUID | None = None
     name: str
     email: str
     created_at: datetime
@@ -181,6 +215,7 @@ class SplitsResponse(BaseModel):
 
 class PaymentCreateOrderRequest(BaseModel):
     """Triggers PayPal order creation. Tanay implements the actual integration."""
+    member_id: UUID | None = None
     return_url: str | None = None
     cancel_url: str | None = None
 
@@ -188,6 +223,7 @@ class PaymentCreateOrderRequest(BaseModel):
 class PaymentCaptureRequest(BaseModel):
     """Triggers PayPal capture. Tanay implements the actual integration."""
     paypal_order_id: str = Field(..., min_length=1, max_length=50)
+    member_id: UUID | None = None
 
 
 class PaymentResponse(BaseModel):
@@ -208,7 +244,7 @@ class PaymentResponse(BaseModel):
 
 class PaymentDirectCreateOrderRequest(BaseModel):
     """Payload for frontend compatibility calling /api/payments/paypal/create-order."""
-    payment_id: UUID | None = None
+    payment_id: UUID | None = Field(default=None, alias="paymentId")
     payer_id: UUID | None = Field(default=None, alias="payerId")
     expense_id: UUID | None = Field(default=None, alias="expenseId")
     receiver_email: str | None = Field(default=None, alias="receiverEmail")
@@ -222,7 +258,7 @@ class PaymentDirectCreateOrderRequest(BaseModel):
 class PaymentDirectCaptureRequest(BaseModel):
     """Payload for frontend compatibility calling /api/payments/paypal/capture-order."""
     order_id: str = Field(..., alias="orderId", min_length=1, max_length=50)
-    payment_id: UUID | None = None
+    payment_id: UUID | None = Field(default=None, alias="paymentId")
     payer_id: UUID | None = Field(default=None, alias="payerId")
     amount: Decimal | None = None
 

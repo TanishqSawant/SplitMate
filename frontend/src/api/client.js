@@ -20,6 +20,25 @@ class ApiClient {
     this.baseURL = BASE_URL;
     this.isBackendAvailable = null; // null: unknown, true: online, false: offline/mock
     this.onStatusChangeCallbacks = new Set();
+    this.authToken = typeof window !== 'undefined' ? localStorage.getItem('splitmate_token') : null;
+  }
+
+  setAuthToken(token) {
+    this.authToken = token;
+    if (typeof window !== 'undefined') {
+      if (token) {
+        localStorage.setItem('splitmate_token', token);
+      } else {
+        localStorage.removeItem('splitmate_token');
+      }
+    }
+  }
+
+  getAuthToken() {
+    if (!this.authToken && typeof window !== 'undefined') {
+      this.authToken = localStorage.getItem('splitmate_token');
+    }
+    return this.authToken;
   }
 
   subscribeStatus(callback) {
@@ -72,16 +91,18 @@ class ApiClient {
   }
 
   /**
-   * Generic request executor with timeout and fallback
+   * Generic request executor with timeout, JWT propagation, and selective fallback
    */
   async request(endpoint, options = {}) {
     const url = `${this.baseURL}${endpoint}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), options.timeout || DEFAULT_TIMEOUT_MS);
 
+    const token = this.getAuthToken();
     const headers = {
       'Accept': 'application/json',
       ...(!options.isFormData && { 'Content-Type': 'application/json' }),
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       ...options.headers,
     };
 
@@ -96,13 +117,40 @@ class ApiClient {
 
       if (!response.ok) {
         const errorBody = await response.json().catch(() => ({}));
-        throw new Error(errorBody.detail || errorBody.message || `HTTP ${response.status}: ${response.statusText}`);
+        const detail =
+          errorBody.detail ||
+          errorBody.message ||
+          `HTTP ${response.status}: ${response.statusText}`;
+
+        if (response.status === 401) {
+          console.warn('[SplitMate API] 401 Unauthorized: Session token is missing or expired.');
+        } else if (response.status === 403) {
+          console.warn('[SplitMate API] 403 Forbidden: Caller lacks permission for this action.');
+        }
+
+        const error = new Error(detail);
+        error.status = response.status;
+        error.detail = detail;
+        throw error;
       }
 
       this.notifyStatus(true);
       return await response.json();
     } catch (err) {
       clearTimeout(timeoutId);
+
+      // Disable mock fallback for all payment routes:
+      // Real integration testing requires genuine backend errors, never synthetic IDs.
+      const isPaymentEndpoint =
+        typeof endpoint === 'string' &&
+        (endpoint.includes('/payments') || endpoint.includes('initialize-payments'));
+
+      if (isPaymentEndpoint) {
+        this.notifyStatus(false);
+        console.error(`[SplitMate API] Payment endpoint error (${url}): ${err.message}`);
+        throw err;
+      }
+
       // If server is unreachable or offline, mark backend offline and provide mock response
       if (err.name === 'AbortError' || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
         this.notifyStatus(false);
@@ -202,30 +250,15 @@ class ApiClient {
       };
     }
 
-    // 6. PayPal Create Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        orderId: `ORDER-${Math.random().toString(36).substring(2, 11).toUpperCase()}`,
-        status: 'CREATED',
-        amount: body.amount,
-        currency: body.currency || 'USD',
-        approvalUrl: 'https://www.sandbox.paypal.com/checkoutnow?token=mock_sandbox_token'
-      };
-    }
-
-    // 7. PayPal Capture Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        captureId: `CAPTURE-${Math.random().toString(36).substring(2, 12).toUpperCase()}`,
-        orderId: body.orderId,
-        status: 'COMPLETED',
-        amount: body.amount,
-        payer: body.payerId,
-        receiver: body.receiverEmail,
-        timestamp: new Date().toISOString(),
-      };
+    // 6. PayPal payments — mock fallback strictly disabled
+    if (
+      endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER ||
+      endpoint === API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER ||
+      (typeof endpoint === 'string' && endpoint.includes('/payments'))
+    ) {
+      throw new Error(
+        'Mock payments disabled. PayPal Sandbox testing requires a running FastAPI backend with configured credentials.'
+      );
     }
 
     // Default fallback

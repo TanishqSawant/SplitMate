@@ -7,13 +7,15 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.models import ExtractionStatus, Receipt, ReceiptItem
+from app.models.models import ExtractionStatus, Receipt, ReceiptItem, User
 from app.schemas.schemas import (
     ReceiptExtractionRequest,
     ReceiptResponse,
 )
+from app.services.authorization import require_receipt_access
 
 router = APIRouter(prefix="/api/receipts", tags=["Receipts"])
 
@@ -87,7 +89,11 @@ def verify_ai_service_key(
     status_code=status.HTTP_201_CREATED,
     summary="Upload a receipt image or PDF",
 )
-def upload_receipt(file: UploadFile, db: Session = Depends(get_db)):
+def upload_receipt(
+    file: UploadFile,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     ext = _validate_upload(file)
 
     # Enforce max size by reading in a bounded fashion
@@ -135,6 +141,7 @@ def upload_receipt(file: UploadFile, db: Session = Depends(get_db)):
         f.write(contents)
 
     receipt = Receipt(
+        uploader_id=current_user.id,
         original_filename=file.filename,
         stored_file_path=str(file_path),
         extraction_status=ExtractionStatus.PENDING,
@@ -148,12 +155,14 @@ def upload_receipt(file: UploadFile, db: Session = Depends(get_db)):
 @router.get(
     "/{receipt_id}",
     response_model=ReceiptResponse,
-    summary="Get receipt details including extracted items",
+    summary="Get receipt details including extracted items (requires authorization)",
 )
-def get_receipt(receipt_id: uuid.UUID, db: Session = Depends(get_db)):
-    receipt = db.get(Receipt, receipt_id)
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Receipt not found.")
+def get_receipt(
+    receipt_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    receipt = require_receipt_access(db, receipt_id, current_user)
     return receipt
 
 

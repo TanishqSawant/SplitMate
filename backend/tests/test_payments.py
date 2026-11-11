@@ -31,7 +31,13 @@ from app.services.paypal_service import (
     PayPalOrderError,
     PayPalService,
 )
-from tests.conftest import TEST_INTERNAL_SERVICE_SECRET, VALID_JPEG_BYTES
+from tests.conftest import (
+    TEST_INTERNAL_SERVICE_SECRET,
+    VALID_JPEG_BYTES,
+    DEFAULT_TEST_USER_EMAIL,
+    DEFAULT_TEST_USER_NAME,
+    create_user_and_client,
+)
 
 AI_KEY_HEADER = {"X-Internal-Service-Key": TEST_INTERNAL_SERVICE_SECRET}
 
@@ -41,15 +47,25 @@ AI_KEY_HEADER = {"X-Internal-Service-Key": TEST_INTERNAL_SERVICE_SECRET}
 # ---------------------------------------------------------------------------
 
 def _create_payment_setup(client):
-    """Helper: creates group -> member -> receipt -> expense -> splits -> initialized payment."""
-    # 1. Group + member
+    """Helper: creates group -> member -> receipt -> expense -> splits -> initialized payment.
+
+    The group member is created with the authenticated user's email so that
+    ``require_payment_access(..., require_payer=True)`` passes for `client`.
+    """
+    # Resolve the authenticated user's identity from the test client fixture.
+    # client.auth_user is set by the `client` fixture in conftest.py.
+    auth_user = getattr(client, "auth_user", None)
+    member_name = auth_user.name if auth_user else DEFAULT_TEST_USER_NAME
+    member_email = auth_user.email if auth_user else DEFAULT_TEST_USER_EMAIL
+
+    # 1. Group + member (must be the authenticated user so payer checks pass)
     group_resp = client.post("/api/groups", json={"name": "Payment Test Group"})
     assert group_resp.status_code == 201
     group_id = group_resp.json()["id"]
 
     member_resp = client.post(
         f"/api/groups/{group_id}/members",
-        json={"name": "Alice", "email": "alice@example.com"},
+        json={"name": member_name, "email": member_email},
     )
     assert member_resp.status_code == 201
     member_id = member_resp.json()["id"]
@@ -600,3 +616,240 @@ def test_payment_history(client):
     response = client.get("/api/payments/history")
     assert response.status_code == 200
     assert len(response.json()) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 7. Reliability & Hardening Tests (Timeout Reconciliation, Rollback, Ownership)
+# ---------------------------------------------------------------------------
+
+def test_capture_reconciliation_after_network_timeout(client):
+    """Scenario:
+    1. First capture call times out (network error). Payment status remains order_created (NOT failed).
+    2. User retries capture. PayPal returns 422 ORDER_ALREADY_CAPTURED.
+    3. Backend reconciles using PayPal order details, verifies amount/currency, and transitions to CAPTURED.
+    """
+    payment_id, _, _ = _create_payment_setup(client)
+
+    mock_svc = PayPalService(client_id="cid", client_secret="csec")
+    mock_svc.create_order = MagicMock(return_value={
+        "id": "RECON-ORDER-101",
+        "status": "CREATED",
+        "approval_url": "https://paypal.example.com",
+    })
+
+    client.app.dependency_overrides[get_paypal_service] = lambda: mock_svc
+    try:
+        # Step 1: Create order
+        create_resp = client.post(f"/api/payments/{payment_id}/create-order", json={})
+        assert create_resp.status_code == 200
+
+        # Step 2: First capture attempt times out
+        mock_svc.capture_order = MagicMock(side_effect=PayPalConnectionError("Connection dropped during capture"))
+        timeout_resp = client.post(
+            f"/api/payments/{payment_id}/capture",
+            json={"paypal_order_id": "RECON-ORDER-101"},
+        )
+        assert timeout_resp.status_code == 504
+        assert "timed out" in timeout_resp.json()["detail"].lower()
+
+        # Verify payment status was NOT marked failed; remains order_created
+        check_resp = client.get(f"/api/payments/{payment_id}")
+        assert check_resp.json()["status"] == "order_created"
+
+        # Step 3: Second capture attempt (retry).
+        # capture_order simulates receiving ORDER_ALREADY_CAPTURED error from PayPal,
+        # but get_order_details returns completed order with capture info.
+        mock_svc.capture_order = MagicMock(
+            side_effect=PayPalCaptureError(
+                message="Order has already been captured.",
+                status_code=422,
+                issue="ORDER_ALREADY_CAPTURED",
+            )
+        )
+        mock_svc.get_order_details = MagicMock(return_value={
+            "id": "RECON-ORDER-101",
+            "status": "COMPLETED",
+            "purchase_units": [
+                {
+                    "payments": {
+                        "captures": [
+                            {
+                                "id": "RECON-CAPTURE-999",
+                                "status": "COMPLETED",
+                                "amount": {"value": "10.80", "currency_code": "USD"},
+                            }
+                        ]
+                    }
+                }
+            ],
+        })
+
+        retry_resp = client.post(
+            f"/api/payments/{payment_id}/capture",
+            json={"paypal_order_id": "RECON-ORDER-101"},
+        )
+        assert retry_resp.status_code == 200
+        data = retry_resp.json()
+        assert data["status"] == "captured"
+        assert data["paypal_capture_id"] == "RECON-CAPTURE-999"
+
+        # Final database check
+        final_check = client.get(f"/api/payments/{payment_id}")
+        assert final_check.json()["status"] == "captured"
+        assert final_check.json()["paypal_capture_id"] == "RECON-CAPTURE-999"
+    finally:
+        client.app.dependency_overrides.pop(get_paypal_service, None)
+
+
+def test_paypal_service_reconciles_already_captured_order():
+    """Unit test: PayPalService.capture_order directly handles 422 ORDER_ALREADY_CAPTURED."""
+    svc = PayPalService(client_id="cid", client_secret="csec")
+    svc.get_access_token = MagicMock(return_value="mock-token")
+
+    already_captured_error = {
+        "name": "UNPROCESSABLE_ENTITY",
+        "details": [
+            {
+                "issue": "ORDER_ALREADY_CAPTURED",
+                "description": "Order has already been captured.",
+            }
+        ],
+    }
+
+    completed_order_details = {
+        "id": "ORD-RECON-1",
+        "status": "COMPLETED",
+        "purchase_units": [
+            {
+                "payments": {
+                    "captures": [
+                        {
+                            "id": "CAP-RECON-1",
+                            "status": "COMPLETED",
+                            "amount": {"value": "25.00", "currency_code": "USD"},
+                        }
+                    ]
+                }
+            }
+        ],
+    }
+
+    with patch("httpx.Client.post") as mock_post:
+        mock_post.return_value = _mock_paypal_http_response(422, already_captured_error)
+        svc.get_order_details = MagicMock(return_value=completed_order_details)
+
+        res = svc.capture_order("ORD-RECON-1")
+        assert res["capture_id"] == "CAP-RECON-1"
+        assert res["status"] == "COMPLETED"
+        assert res["captured_amount"] == "25.00"
+        assert res["captured_currency"] == "USD"
+        svc.get_order_details.assert_called_once_with("ORD-RECON-1")
+
+
+def test_payment_ownership_violation_create_order(client, db_session):
+    """Verify that an authenticated user who is NOT the payer cannot create an order (403)."""
+    # Setup: payment belongs to `client` (the primary authenticated user)
+    payment_id, _, _ = _create_payment_setup(client)
+
+    # Create a second user who does NOT own the payment
+    _, impostor_client, _ = create_user_and_client(db_session, email="impostor@example.com", name="Impostor")
+
+    response = impostor_client.post(
+        f"/api/payments/{payment_id}/create-order",
+        json={},
+    )
+    assert response.status_code == 403
+    assert "not authorized" in response.json()["detail"].lower() or "only manage" in response.json()["detail"].lower()
+
+
+def test_payment_ownership_violation_capture(client, db_session):
+    """Verify that an authenticated user who is NOT the payer cannot capture a payment (403)."""
+    # Setup: payment belongs to `client` (the primary authenticated user)
+    payment_id, _, _ = _create_payment_setup(client)
+
+    mock_svc = PayPalService(client_id="cid", client_secret="csec")
+    mock_svc.create_order = MagicMock(return_value={"id": "ORD-OWN-1", "status": "CREATED"})
+    client.app.dependency_overrides[get_paypal_service] = lambda: mock_svc
+    try:
+        # Legitimate owner creates the order
+        client.post(f"/api/payments/{payment_id}/create-order", json={})
+
+        # Create a second user who does NOT own the payment
+        _, impostor_client, _ = create_user_and_client(db_session, email="impostor2@example.com", name="Impostor2")
+        impostor_client.app = client.app  # share the app instance with its dependency overrides
+
+        response = impostor_client.post(
+            f"/api/payments/{payment_id}/capture",
+            json={"paypal_order_id": "ORD-OWN-1"},
+        )
+        assert response.status_code == 403
+        assert "not authorized" in response.json()["detail"].lower() or "only manage" in response.json()["detail"].lower()
+    finally:
+        client.app.dependency_overrides.pop(get_paypal_service, None)
+
+
+def test_database_rollback_on_commit_error(client):
+    """Verify that when db.commit() raises an exception during capture, rollback is executed."""
+    payment_id, _, _ = _create_payment_setup(client)
+
+    mock_svc = PayPalService(client_id="cid", client_secret="csec")
+    mock_svc.create_order = MagicMock(return_value={"id": "ORD-ROLLBACK", "status": "CREATED"})
+    mock_svc.capture_order = MagicMock(return_value={
+        "order_id": "ORD-ROLLBACK",
+        "capture_id": "CAP-ROLLBACK",
+        "status": "COMPLETED",
+        "captured_amount": "10.80",
+        "captured_currency": "USD",
+    })
+
+    client.app.dependency_overrides[get_paypal_service] = lambda: mock_svc
+    try:
+        client.post(f"/api/payments/{payment_id}/create-order", json={})
+
+        # Mock db.commit to raise an exception
+        from sqlalchemy.orm import Session
+        with patch.object(Session, "commit", side_effect=RuntimeError("Simulated DB Disk Failure")):
+            response = client.post(
+                f"/api/payments/{payment_id}/capture",
+                json={"paypal_order_id": "ORD-ROLLBACK"},
+            )
+            assert response.status_code == 500
+            assert "Failed to commit" in response.json()["detail"]
+    finally:
+        client.app.dependency_overrides.pop(get_paypal_service, None)
+
+
+def test_concurrent_capture_attempts(client):
+    """Verify concurrent/duplicate capture attempt on already captured payment returns 409."""
+    payment_id, _, _ = _create_payment_setup(client)
+
+    mock_svc = PayPalService(client_id="cid", client_secret="csec")
+    mock_svc.create_order = MagicMock(return_value={"id": "ORD-CONC-1", "status": "CREATED"})
+    mock_svc.capture_order = MagicMock(return_value={
+        "order_id": "ORD-CONC-1",
+        "capture_id": "CAP-CONC-1",
+        "status": "COMPLETED",
+        "captured_amount": "10.80",
+        "captured_currency": "USD",
+    })
+
+    client.app.dependency_overrides[get_paypal_service] = lambda: mock_svc
+    try:
+        client.post(f"/api/payments/{payment_id}/create-order", json={})
+
+        # First capture attempt
+        first_resp = client.post(
+            f"/api/payments/{payment_id}/capture",
+            json={"paypal_order_id": "ORD-CONC-1"},
+        )
+        assert first_resp.status_code == 200
+
+        # Concurrent/subsequent attempt on captured payment
+        second_resp = client.post(
+            f"/api/payments/{payment_id}/capture",
+            json={"paypal_order_id": "ORD-CONC-1"},
+        )
+        assert second_resp.status_code == 409
+        assert "already captured" in second_resp.json()["detail"].lower()
+    finally:
+        client.app.dependency_overrides.pop(get_paypal_service, None)

@@ -24,6 +24,7 @@ SplitMate uses:
 - **Backend Framework:** FastAPI with Uvicorn
 - **Database:** PostgreSQL (with SQLAlchemy 2.0 ORM & Alembic migrations)
 - **Data Validation:** Pydantic v2
+- **Authentication & Security:** JWT (HS256) with PyJWT, bcrypt password hashing, IDOR authorization guards, file magic-byte validation, and machine-to-machine internal service authentication.
 - **Precision:** `Decimal` (`NUMERIC(12, 2)` / `NUMERIC(10, 4)`) for all financial amounts to eliminate floating-point rounding errors.
 - **Identifiers:** Standard UUID v4 strings for all primary and foreign keys.
 
@@ -181,8 +182,9 @@ Dhruv owns the React + TypeScript + Vite frontend.
 
 ### Endpoint Reference
 
-#### 1. System Health
+#### 1. System Health (Public)
 - **`GET /health`**
+  - **Auth:** None (Public)
   - **Response (`200 OK`):**
     ```json
     {
@@ -193,7 +195,91 @@ Dhruv owns the React + TypeScript + Vite frontend.
 
 ---
 
-#### 2. Receipts
+#### 2. Authentication (Public & User Endpoints)
+
+##### `POST /api/auth/register`
+- **Auth:** None (Public)
+- **Description:** Registers a new user. Passwords must be at least 8 characters.
+- **Request Body:**
+  ```json
+  {
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "password": "StrongPassword123!"
+  }
+  ```
+- **Response (`201 Created`):**
+  ```json
+  {
+    "id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "created_at": "2026-11-10T12:00:00Z"
+  }
+  ```
+- **Error Responses:**
+  - `400 Bad Request`: Email already registered.
+  - `422 Unprocessable Entity`: Invalid email format or password less than 8 characters.
+
+##### `POST /api/auth/login`
+- **Auth:** None (Public)
+- **Description:** Authenticates user credentials and issues a signed JWT access token.
+- **Request Body:**
+  ```json
+  {
+    "email": "jane@example.com",
+    "password": "StrongPassword123!"
+  }
+  ```
+- **Response (`200 OK`):**
+  ```json
+  {
+    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "token_type": "bearer",
+    "user": {
+      "id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
+      "name": "Jane Doe",
+      "email": "jane@example.com",
+      "created_at": "2026-11-10T12:00:00Z"
+    }
+  }
+  ```
+- **Error Responses:**
+  - `401 Unauthorized`: Invalid email or password.
+
+##### `GET /api/auth/me`
+- **Auth:** `Authorization: Bearer <access_token>`
+- **Description:** Returns the authenticated user's profile.
+- **Response (`200 OK`):**
+  ```json
+  {
+    "id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "created_at": "2026-11-10T12:00:00Z"
+  }
+  ```
+- **Error Responses:**
+  - `401 Unauthorized`: Missing, expired, or invalid token.
+
+---
+
+> [!IMPORTANT]
+> **Authentication for Protected Endpoints:**
+> All endpoints under `/api/groups`, `/api/receipts` (upload & get), `/api/expenses`, and `/api/payments` require the user's JWT access token in the request header:
+> ```http
+> Authorization: Bearer <access_token>
+> ```
+> Requests without this header receive **HTTP 401 Unauthorized**.
+> The only exceptions are:
+> 1. `GET /health` (Public)
+> 2. `POST /api/auth/register` (Public)
+> 3. `POST /api/auth/login` (Public)
+> 4. `POST /api/receipts/{receipt_id}/extraction` (Requires machine-to-machine `X-Internal-Service-Key`, NOT user JWT)
+
+---
+
+#### 3. Receipts (Protected)
 - **`POST /api/receipts/upload`**
   - **Content-Type:** `multipart/form-data`
   - **Form Data:** `file`: Binary file (Accepted types: `.jpg`, `.jpeg`, `.png`, `.webp`, `.pdf`. Max size: 10 MB).
@@ -537,37 +623,46 @@ Interactive API documentation:
 ```powershell
 pytest tests/ -v
 ```
-All 29 unit & integration tests use SQLite in-memory fixtures and run without requiring an external PostgreSQL instance.
+All 93 unit, integration, security, and extraction tests use SQLite in-memory fixtures and run cleanly without requiring an external PostgreSQL instance.
 
 ---
 
 ### Integration Test Scenarios for QA Demo
 
-1. **Scenario 1: Receipt Upload & AI Extraction Ingestion**
-   - Upload receipt image via `POST /api/receipts/upload`.
-   - Submit extraction payload via `POST /api/receipts/{id}/extraction`.
+1. **Scenario 1: User Registration & Authentication**
+   - Register user via `POST /api/auth/register`.
+   - Log in via `POST /api/auth/login` to obtain JWT Bearer access token.
+   - Access `GET /api/auth/me` with Bearer token to verify current user identity.
+
+2. **Scenario 2: Receipt Upload & AI Extraction Ingestion**
+   - Upload receipt image via `POST /api/receipts/upload` with Bearer token.
+   - Submit extraction payload via `POST /api/receipts/{id}/extraction` with `X-Internal-Service-Key` header.
    - Verify `GET /api/receipts/{id}` returns correct line items and `extraction_status: completed`.
 
-2. **Scenario 2: Expense Creation & Member Assignment**
+3. **Scenario 3: Expense Creation & Member Assignment**
    - Create group via `POST /api/groups`.
    - Add 3 members via `POST /api/groups/{id}/members`.
-   - Create expense for the group.
+   - Create expense for the group matching receipt total.
    - Batch assign items: Assign item 1 to member A (100%), item 2 shared equally between member B and C (50% each).
 
-3. **Scenario 3: Split Calculation, Tax Distribution & Reconciliation**
+4. **Scenario 4: Split Calculation, Tax Distribution & Reconciliation**
    - Call `GET /api/expenses/{id}/splits`.
    - Verify pure read-only behavior (no payment records created).
    - Verify sum of splits matches `expense.total_amount` exactly down to the cent, including tax/tip.
 
-4. **Scenario 4: Payment Initialization**
+5. **Scenario 5: Payment Initialization & IDOR Enforcement**
    - Call `POST /api/expenses/{id}/initialize-payments`.
    - Verify pending payment records are generated with exact matching amounts.
+   - Verify a user can only create a PayPal order for their OWN share (`403 Forbidden` if attempting to pay someone else's share).
    - Verify calling initialize-payments again safely updates pending amounts.
    - Verify once any payment transitions to `order_created` or `captured`, re-initialization is blocked (`409 Conflict`).
 
-5. **Scenario 5: Security & Validation Edge Cases**
-   - Attempt uploading non-supported file extension (`.exe` or `.txt`) -> Expect `400 Bad Request`.
-   - Attempt submitting extraction twice for the same receipt -> Expect `409 Conflict`.
+6. **Scenario 6: Security & Validation Edge Cases**
+   - Attempt accessing another user's group or receipt without membership -> Expect `404 Not Found` (IDOR concealment).
+   - Attempt uploading non-supported file extension (`.exe` or `.txt`) or file with mismatched magic bytes -> Expect `400 Bad Request`.
+   - Attempt submitting extraction without internal service key -> Expect `401 Unauthorized` (`403 Forbidden` if wrong key).
+   - Attempt creating expense with total mismatching extracted receipt total -> Expect `400 Bad Request`.
+   - Attempt initializing payments with unassigned receipt items -> Expect `400 Bad Request`.
    - Attempt assigning an item to a member outside the expense group -> Expect `400 Bad Request`.
    - Attempt assigning an item from a different receipt -> Expect `400 Bad Request`.
    - Attempt assigning more quantity than purchased (`> item.quantity`) -> Expect `400 Bad Request`.
@@ -577,11 +672,15 @@ All 29 unit & integration tests use SQLite in-memory fixtures and run without re
 
 ## 6. Security & Architectural Guardrails
 
-1. **Zero Secret Leakage:** No API secrets, credentials, or `.env` files are checked into version control.
-2. **Safe File Handling:** Uploaded filenames are sanitized and stored using random UUIDs (`uuid.uuid4().hex + ext`). File extensions and payload sizes are restricted before disk writes. Internal absolute file paths are never returned to clients.
-3. **Financial Precision:** All amounts are parsed and manipulated using Python's `Decimal` with `ROUND_HALF_UP` to prevent floating-point discrepancies.
-4. **Penny Allocation:** Remainder residue is distributed to members with highest fractional discrepancy so that the sum of splits equals `total_amount` exactly.
-5. **State Machine Integrity:** Payment status transitions are strictly unidirectional (`pending` -> `order_created` -> `captured` / `failed`). Duplicate captures and duplicate order creation are rejected.
-6. **Cross-Tenant & Cross-Group Integrity:** All assignments are validated against the expense group and expense receipt. Unique constraints `uq_expense_assignments_item_member` and `uq_payments_expense_member` prevent duplicate records.
-7. **Database Consistency:** Database foreign keys enforce `CASCADE` on groups/receipts/members and `SET NULL` on optional references to maintain relational integrity.
+1. **Authentication & Token Lifecycle:** Users authenticate via `POST /api/auth/login` to obtain an HMAC-SHA256 (HS256) JWT access token with a configurable expiration window (`ACCESS_TOKEN_EXPIRE_MINUTES`). Passwords are salted and hashed using `bcrypt` (12 rounds) and are never stored or returned.
+2. **Multi-Tenant IDOR Isolation:** Group creators and explicit group members are the only principals authorized to view or mutate group resources (receipts, expenses, assignments, and payments). Unauthorized access attempts to cross-tenant resources return `404 Not Found` rather than `403 Forbidden` to prevent object existence enumeration.
+3. **Payer-Specific Enforcement:** Users can only initiate or capture payments assigned directly to their own membership record; attempting to initiate payment for another member returns `403 Forbidden`.
+4. **Machine-to-Machine Secret Isolation:** AI extraction ingestion via `POST /api/receipts/{receipt_id}/extraction` uses a dedicated `X-Internal-Service-Key` header verified with constant-time string comparison (`secrets.compare_digest`), decoupled from end-user JWT authentication.
+5. **Zero Secret Leakage:** No API secrets, credentials, or `.env` files are checked into version control.
+6. **Safe File Handling & Magic Bytes:** Uploaded filenames are sanitized and stored using random UUIDs (`uuid.uuid4().hex + ext`). File extensions, sizes, and file magic bytes (JPEG, PNG, WEBP, PDF signatures) are verified before disk writes. Internal absolute file paths are never returned to clients.
+7. **Financial Precision:** All amounts are parsed and manipulated using Python's `Decimal` with `ROUND_HALF_UP` to prevent floating-point discrepancies.
+8. **Penny Allocation:** Remainder residue is distributed to members with highest fractional discrepancy so that the sum of splits equals `total_amount` exactly.
+9. **State Machine Integrity:** Payment status transitions are strictly unidirectional (`pending` -> `order_created` -> `captured` / `failed`). Duplicate captures and duplicate order creation are rejected.
+10. **Receipt-Item Assignment Completeness:** Expense payment initialization strictly requires that every item from the associated receipt has been 100% assigned, preventing unassigned line items from being forgotten.
+11. **Database Consistency:** Database foreign keys enforce `CASCADE` on groups/receipts/members and `SET NULL` on optional references to maintain relational integrity.
 

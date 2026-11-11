@@ -37,14 +37,28 @@ class PayPalAuthError(PayPalError):
 
 class PayPalOrderError(PayPalError):
     """Raised when PayPal order creation fails."""
-    def __init__(self, message: str = "PayPal order creation failed.", status_code: int = 502, details: Any = None):
+    def __init__(
+        self,
+        message: str = "PayPal order creation failed.",
+        status_code: int = 502,
+        details: Any = None,
+        issue: str | None = None,
+    ):
         super().__init__(message=message, status_code=status_code, details=details)
+        self.issue = issue
 
 
 class PayPalCaptureError(PayPalError):
     """Raised when PayPal payment capture fails."""
-    def __init__(self, message: str = "PayPal payment capture failed.", status_code: int = 502, details: Any = None):
+    def __init__(
+        self,
+        message: str = "PayPal payment capture failed.",
+        status_code: int = 502,
+        details: Any = None,
+        issue: str | None = None,
+    ):
         super().__init__(message=message, status_code=status_code, details=details)
+        self.issue = issue
 
 
 class PayPalConnectionError(PayPalError):
@@ -193,16 +207,14 @@ class PayPalService:
         payload: dict[str, Any] = {
             "intent": "CAPTURE",
             "purchase_units": [purchase_unit],
-        }
-
-        if return_url and cancel_url:
-            payload["application_context"] = {
+            "application_context": {
                 "brand_name": "SplitMate",
                 "landing_page": "NO_PREFERENCE",
                 "user_action": "PAY_NOW",
-                "return_url": return_url,
-                "cancel_url": cancel_url,
-            }
+                "return_url": return_url or "https://splitmate.local/payment/return",
+                "cancel_url": cancel_url or "https://splitmate.local/payment/cancel",
+            },
+        }
 
         try:
             with httpx.Client(timeout=self.timeout) as client:
@@ -216,6 +228,7 @@ class PayPalService:
 
         if response.status_code not in (200, 201):
             error_data = None
+            issue = None
             try:
                 error_data = response.json()
             except Exception:
@@ -226,12 +239,18 @@ class PayPalService:
                 msg = error_data.get("message")
                 details = error_data.get("details")
                 if details and isinstance(details, list) and len(details) > 0:
-                    issue = details[0].get("description") or details[0].get("issue")
-                    message = f"{msg}: {issue}" if msg and issue else (msg or issue or message)
+                    issue = details[0].get("issue")
+                    desc = details[0].get("description") or issue
+                    message = f"{msg}: {desc}" if msg and desc else (msg or desc or message)
                 elif msg:
                     message = msg
 
-            raise PayPalOrderError(message=message, status_code=response.status_code, details=error_data)
+            raise PayPalOrderError(
+                message=message,
+                status_code=response.status_code,
+                details=error_data,
+                issue=issue,
+            )
 
         try:
             data = response.json()
@@ -256,12 +275,54 @@ class PayPalService:
             "raw_response": data,
         }
 
+    def _parse_order_capture(self, order_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Extract and validate capture record from PayPal response payload."""
+        overall_status = data.get("status")
+
+        purchase_units = data.get("purchase_units", [])
+        captures = []
+        if purchase_units and isinstance(purchase_units, list):
+            payments = purchase_units[0].get("payments", {})
+            captures = payments.get("captures", [])
+
+        if not captures:
+            raise PayPalCaptureError(
+                message="No capture records found in PayPal response.",
+                details=data,
+            )
+
+        primary_capture = captures[0]
+        capture_id = primary_capture.get("id")
+        capture_status = primary_capture.get("status")
+        amount_info = primary_capture.get("amount", {})
+        captured_amount = amount_info.get("value")
+        captured_currency = amount_info.get("currency_code")
+
+        if not capture_id:
+            raise PayPalCaptureError(
+                message="PayPal capture response missing capture ID.",
+                details=data,
+            )
+
+        return {
+            "order_id": order_id,
+            "capture_id": capture_id,
+            "status": capture_status or overall_status,
+            "overall_status": overall_status,
+            "captured_amount": captured_amount,
+            "captured_currency": captured_currency,
+            "raw_response": data,
+        }
+
     def capture_order(
         self,
         order_id: str,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Capture an approved PayPal order.
+
+        Includes automatic reconciliation if PayPal returns ORDER_ALREADY_CAPTURED
+        (e.g., following a network timeout on a previous attempt).
 
         Args:
             order_id: The PayPal order ID.
@@ -292,63 +353,56 @@ class PayPalService:
 
         if response.status_code not in (200, 201):
             error_data = None
+            issue = None
             try:
                 error_data = response.json()
             except Exception:
                 pass
             logger.error("PayPal capture failed with status %s for order %s", response.status_code, order_id)
+
+            # Check for ORDER_ALREADY_CAPTURED to reconcile idempotent retries
+            is_already_captured = False
+            if isinstance(error_data, dict):
+                details = error_data.get("details", [])
+                if isinstance(details, list):
+                    for d in details:
+                        if isinstance(d, dict) and d.get("issue") == "ORDER_ALREADY_CAPTURED":
+                            is_already_captured = True
+                            issue = "ORDER_ALREADY_CAPTURED"
+                            break
+
+            if is_already_captured:
+                logger.info(
+                    "Order %s was already captured on PayPal. Reconciling via order details...",
+                    order_id,
+                )
+                try:
+                    order_details = self.get_order_details(order_id)
+                    return self._parse_order_capture(order_id, order_details)
+                except Exception as rec_exc:
+                    logger.warning("Failed automatic reconciliation for order %s: %s", order_id, rec_exc)
+
             message = "PayPal payment capture failed."
             if isinstance(error_data, dict):
                 msg = error_data.get("message")
                 details = error_data.get("details")
                 if details and isinstance(details, list) and len(details) > 0:
-                    issue = details[0].get("description") or details[0].get("issue")
-                    message = f"{msg}: {issue}" if msg and issue else (msg or issue or message)
+                    issue = details[0].get("issue") or issue
+                    desc = details[0].get("description") or issue
+                    message = f"{msg}: {desc}" if msg and desc else (msg or desc or message)
                 elif msg:
                     message = msg
 
-            raise PayPalCaptureError(message=message, status_code=response.status_code, details=error_data)
+            raise PayPalCaptureError(
+                message=message,
+                status_code=response.status_code,
+                details=error_data,
+                issue=issue,
+            )
 
         try:
             data = response.json()
-            overall_status = data.get("status")
-
-            # Extract capture details from purchase units
-            purchase_units = data.get("purchase_units", [])
-            captures = []
-            if purchase_units and isinstance(purchase_units, list):
-                payments = purchase_units[0].get("payments", {})
-                captures = payments.get("captures", [])
-
-            if not captures:
-                raise PayPalCaptureError(
-                    message="No capture records found in PayPal response.",
-                    details=data,
-                )
-
-            primary_capture = captures[0]
-            capture_id = primary_capture.get("id")
-            capture_status = primary_capture.get("status")
-            amount_info = primary_capture.get("amount", {})
-            captured_amount = amount_info.get("value")
-            captured_currency = amount_info.get("currency_code")
-
-            if not capture_id:
-                raise PayPalCaptureError(
-                    message="PayPal capture response missing capture ID.",
-                    details=data,
-                )
-
-            return {
-                "order_id": order_id,
-                "capture_id": capture_id,
-                "status": capture_status or overall_status,
-                "overall_status": overall_status,
-                "captured_amount": captured_amount,
-                "captured_currency": captured_currency,
-                "raw_response": data,
-            }
-
+            return self._parse_order_capture(order_id, data)
         except (KeyError, IndexError, ValueError, TypeError) as exc:
             logger.error("Malformed capture response from PayPal: %s", exc)
             raise PayPalCaptureError(
@@ -357,7 +411,7 @@ class PayPalService:
             ) from exc
 
     def get_order_details(self, order_id: str) -> dict[str, Any]:
-        """Fetch details of an existing order."""
+        """Fetch details of an existing order from PayPal."""
         token = self.get_access_token()
         url = f"{self.base_url}/v2/checkout/orders/{order_id}"
         headers = {
@@ -384,4 +438,3 @@ class PayPalService:
 
 # Module-level default singleton instance
 paypal_service = PayPalService()
-

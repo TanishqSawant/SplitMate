@@ -384,84 +384,194 @@ export function ExpenseProvider({ children }) {
   };
 
   // Open PayPal Payment Modal for a debt
-  const openPayPalPayment = ({ creditor, debtor, amount, note, groupId }) => {
+  const openPayPalPayment = async ({
+    creditor,
+    debtor,
+    amount,
+    note,
+    groupId,
+    expenseId,
+    paymentId,
+    payerMemberId,
+  }) => {
+    let resolvedPaymentId = paymentId || null;
+
+    // If expenseId provided but no paymentId, initialize payments with backend
+    if (expenseId && !resolvedPaymentId) {
+      const initResult = await initializeExpensePayments(expenseId);
+      if (initResult.success && Array.isArray(initResult.payments)) {
+        const myPayment = initResult.payments.find(
+          (p) => p.member_id === (payerMemberId || debtor?.id || currentUser?.id)
+        ) || initResult.payments[0];
+        if (myPayment) {
+          resolvedPaymentId = myPayment.id;
+        }
+      }
+    }
+
     setPayPalModal({
       isOpen: true,
       payer: debtor || currentUser,
       receiver: creditor,
       amount,
       currency: 'USD',
-      note: note || `Settle debt with ${creditor.name}`,
+      note: note || `Settle debt with ${creditor?.name || 'creditor'}`,
       groupId,
+      expenseId: expenseId || null,
+      paymentId: resolvedPaymentId,
+      payerMemberId: payerMemberId || null,
       status: 'idle',
       transactionId: null,
+      error: null,
     });
   };
 
   const closePayPalModal = () => {
-    setPayPalModal((prev) => ({ ...prev, isOpen: false, status: 'idle' }));
+    setPayPalModal((prev) => ({ ...prev, isOpen: false, status: 'idle', error: null }));
   };
 
-  // Execute PayPal Payment Flow (Tanay's integration)
-  const executePayPalPayment = async () => {
-    setPayPalModal((prev) => ({ ...prev, status: 'initiating' }));
-
+  // Fetch real payment history from backend (Tanay's GET /api/payments/history)
+  const fetchPaymentHistory = async () => {
     try {
-      // Step 1: Create Order
-      const order = await apiClient.request(API_ENDPOINTS.PAYMENTS.CREATE_ORDER, {
-        method: 'POST',
-        body: JSON.stringify({
-          amount: payPalModal.amount,
-          currency: payPalModal.currency,
-          receiverEmail: payPalModal.receiver.paypalEmail,
-          payerId: payPalModal.payer.id,
-          note: payPalModal.note,
-        }),
+      const payments = await apiClient.request(API_ENDPOINTS.PAYMENTS.HISTORY, {
+        method: 'GET',
       });
+      if (Array.isArray(payments)) {
+        const normalized = payments.map((p) => ({
+          id: p.id,
+          orderId: p.paypal_order_id,
+          captureId: p.paypal_capture_id || p.id,
+          payerId: p.member_id,
+          payerName: p.member_id ? `Member (${String(p.member_id).substring(0, 8)})` : 'Squad Member',
+          receiverName: 'SplitMate Group',
+          amount: parseFloat(p.amount) || 0,
+          currency: p.currency || 'USD',
+          date: p.updated_at || p.created_at,
+          status: (p.status || '').toUpperCase(),
+          raw: p,
+        }));
+        setTransactions(normalized);
+        return { success: true, transactions: normalized };
+      }
+    } catch (err) {
+      console.warn('[SplitMate] Failed to fetch payment history from backend:', err.message);
+    }
+  };
 
-      setPayPalModal((prev) => ({ ...prev, status: 'authorizing' }));
-      await new Promise((r) => setTimeout(r, 700));
+  // Fetch payment history on mount and when currentUser changes
+  useEffect(() => {
+    fetchPaymentHistory();
+  }, [currentUser]);
 
-      // Step 2: Capture Order
-      setPayPalModal((prev) => ({ ...prev, status: 'capturing' }));
-      const capture = await apiClient.request(API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER, {
-        method: 'POST',
-        body: JSON.stringify({
-          orderId: order.orderId,
-          amount: payPalModal.amount,
-          payerId: payPalModal.payer.id,
-          receiverEmail: payPalModal.receiver.paypalEmail,
-        }),
-      });
+  // Initialize expense payments after splits are finalized (POST /api/expenses/{expense_id}/initialize-payments)
+  const initializeExpensePayments = async (expenseId) => {
+    if (!expenseId) return { success: false, error: 'No expense ID provided' };
+    try {
+      const payments = await apiClient.request(
+        API_ENDPOINTS.EXPENSES.INITIALIZE_PAYMENTS(expenseId),
+        { method: 'POST' }
+      );
+      return { success: true, payments };
+    } catch (err) {
+      console.warn(`[SplitMate] initialize-payments failed for ${expenseId}:`, err.message);
+      return { success: false, error: err.message };
+    }
+  };
 
-      // Step 3: Record transaction and update expense split states
-      const newTxn = {
-        id: `txn_pp_${Date.now()}`,
-        orderId: order.orderId,
-        captureId: capture.captureId,
-        payerId: payPalModal.payer.id,
-        payerName: payPalModal.payer.name,
-        receiverId: payPalModal.receiver.id,
-        receiverName: payPalModal.receiver.name,
-        receiverEmail: payPalModal.receiver.paypalEmail,
-        amount: payPalModal.amount,
-        currency: payPalModal.currency,
-        date: new Date().toISOString(),
-        status: 'COMPLETED',
-        note: payPalModal.note,
-        method: 'PayPal Sandbox Checkout',
-      };
+  // Step 1: Create PayPal Order via FastAPI backend
+  const createPayPalOrder = async () => {
+    setPayPalModal((prev) => ({ ...prev, status: 'initiating', error: null }));
+    try {
+      let response;
+      if (payPalModal.paymentId) {
+        response = await apiClient.request(
+          API_ENDPOINTS.PAYMENTS.CREATE_ORDER_FOR_PAYMENT(payPalModal.paymentId),
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              return_url: `${window.location.origin}/payment/success`,
+              cancel_url: `${window.location.origin}/payment/cancel`,
+            }),
+          }
+        );
+      } else {
+        response = await apiClient.request(API_ENDPOINTS.PAYMENTS.CREATE_ORDER, {
+          method: 'POST',
+          body: JSON.stringify({
+            paymentId: payPalModal.paymentId,
+            payerId: payPalModal.payerMemberId || payPalModal.payer?.id,
+            expenseId: payPalModal.expenseId,
+            receiverEmail: payPalModal.receiver?.paypalEmail,
+            note: payPalModal.note,
+          }),
+        });
+      }
 
-      setTransactions((prev) => [newTxn, ...prev]);
+      // Backend returns PaymentResponse with paypal_order_id
+      const orderId = response.paypal_order_id || response.orderId || response.id;
+      if (!orderId) {
+        throw new Error('PayPal order created but no order ID returned from backend.');
+      }
 
-      // Mark matching debts as settled in expenses
+      setPayPalModal((prev) => ({
+        ...prev,
+        status: 'authorizing',
+        orderId,
+        paymentId: response.id || prev.paymentId,
+      }));
+
+      return orderId;
+    } catch (err) {
+      setPayPalModal((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err.detail || err.message || 'Failed to create PayPal order.',
+      }));
+      throw err;
+    }
+  };
+
+  // Step 2: Capture PayPal Order via FastAPI backend upon genuine onApprove
+  const capturePayPalOrder = async (orderId) => {
+    setPayPalModal((prev) => ({ ...prev, status: 'capturing', error: null }));
+    try {
+      const activeOrderId = orderId || payPalModal.orderId;
+      let response;
+
+      if (payPalModal.paymentId) {
+        response = await apiClient.request(
+          API_ENDPOINTS.PAYMENTS.CAPTURE_FOR_PAYMENT(payPalModal.paymentId),
+          {
+            method: 'POST',
+            body: JSON.stringify({ paypal_order_id: activeOrderId }),
+          }
+        );
+      } else {
+        response = await apiClient.request(API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER, {
+          method: 'POST',
+          body: JSON.stringify({
+            orderId: activeOrderId,
+            paymentId: payPalModal.paymentId,
+            payerId: payPalModal.payerMemberId || payPalModal.payer?.id,
+          }),
+        });
+      }
+
+      const captureStatus = (response.status || '').toLowerCase();
+      if (captureStatus !== 'captured' && captureStatus !== 'completed') {
+        throw new Error(`Unexpected capture status: ${response.status}. Please check payment history.`);
+      }
+
+      const captureId = response.paypal_capture_id || response.captureId || activeOrderId;
+
+      // Mark matching debts as settled in expenses state
       setExpenses((prevExpenses) =>
         prevExpenses.map((exp) => {
-          if (exp.paidBy === payPalModal.receiver.id) {
+          if (exp.paidBy === payPalModal.receiver?.id || exp.id === payPalModal.expenseId) {
             return {
               ...exp,
-              splitDetails: exp.splitDetails.map((detail) => {
-                if (detail.userId === payPalModal.payer.id) {
+              splitDetails: (exp.splitDetails || []).map((detail) => {
+                if (detail.userId === payPalModal.payer?.id) {
                   return { ...detail, isPaid: true };
                 }
                 return detail;
@@ -472,26 +582,39 @@ export function ExpenseProvider({ children }) {
         })
       );
 
+      // Refresh payment history from real backend
+      await fetchPaymentHistory();
+
       setPayPalModal((prev) => ({
         ...prev,
         status: 'success',
-        transactionId: capture.captureId,
+        transactionId: captureId,
       }));
 
-      // Fire celebratory confetti for the fintech win!
+      // Fire celebratory confetti!
       confetti({
         particleCount: 120,
         spread: 80,
-        origin: { y: 0.6 }
+        origin: { y: 0.6 },
       });
 
-      return { success: true, captureId: capture.captureId };
+      return { success: true, captureId, response };
     } catch (err) {
       setPayPalModal((prev) => ({
         ...prev,
         status: 'error',
-        error: err.message || 'Payment processing failed. Please retry.',
+        error: err.detail || err.message || 'Payment capture failed.',
       }));
+      throw err;
+    }
+  };
+
+  // Programmatic / fallback payment execution
+  const executePayPalPayment = async () => {
+    try {
+      const orderId = await createPayPalOrder();
+      return await capturePayPalOrder(orderId);
+    } catch (err) {
       return { success: false, error: err.message };
     }
   };
@@ -520,6 +643,10 @@ export function ExpenseProvider({ children }) {
         openPayPalPayment,
         closePayPalModal,
         executePayPalPayment,
+        createPayPalOrder,
+        capturePayPalOrder,
+        initializeExpensePayments,
+        fetchPaymentHistory,
       }}
     >
       {children}
