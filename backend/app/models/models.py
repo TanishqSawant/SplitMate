@@ -79,6 +79,39 @@ class PaymentStatus(str, enum.Enum):
 # Models
 # ---------------------------------------------------------------------------
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(
+        String(320), unique=True, index=True, nullable=False
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    # Relationships
+    groups_created: Mapped[list["ExpenseGroup"]] = relationship(
+        back_populates="creator"
+    )
+    receipts_uploaded: Mapped[list["Receipt"]] = relationship(
+        back_populates="uploader"
+    )
+    group_memberships: Mapped[list["GroupMember"]] = relationship(
+        back_populates="user"
+    )
+
+
 class ExpenseGroup(Base):
     __tablename__ = "expense_groups"
 
@@ -86,16 +119,26 @@ class ExpenseGroup(Base):
         UUID(), primary_key=True, default=uuid.uuid4
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    creator_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     # Relationships
+    creator: Mapped["User | None"] = relationship(back_populates="groups_created")
     members: Mapped[list["GroupMember"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
     expenses: Mapped[list["Expense"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_expense_groups_creator_id", "creator_id"),
     )
 
 
@@ -110,6 +153,11 @@ class GroupMember(Base):
         ForeignKey("expense_groups.id", ondelete="CASCADE"),
         nullable=False,
     )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -118,6 +166,7 @@ class GroupMember(Base):
 
     # Relationships
     group: Mapped["ExpenseGroup"] = relationship(back_populates="members")
+    user: Mapped["User | None"] = relationship(back_populates="group_memberships")
     assignments: Mapped[list["ExpenseAssignment"]] = relationship(
         back_populates="member", cascade="all, delete-orphan"
     )
@@ -127,6 +176,7 @@ class GroupMember(Base):
 
     __table_args__ = (
         Index("ix_group_members_group_id", "group_id"),
+        Index("ix_group_members_user_id", "user_id"),
         Index("ix_group_members_email", "email"),
     )
 
@@ -136,6 +186,11 @@ class Receipt(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(), primary_key=True, default=uuid.uuid4
+    )
+    uploader_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_file_path: Mapped[str] = mapped_column(Text, nullable=False)
@@ -154,11 +209,16 @@ class Receipt(Base):
     )
 
     # Relationships
+    uploader: Mapped["User | None"] = relationship(back_populates="receipts_uploaded")
     items: Mapped[list["ReceiptItem"]] = relationship(
         back_populates="receipt", cascade="all, delete-orphan"
     )
     expenses: Mapped[list["Expense"]] = relationship(
         back_populates="receipt"
+    )
+
+    __table_args__ = (
+        Index("ix_receipts_uploader_id", "uploader_id"),
     )
 
 

@@ -18,6 +18,15 @@ export function AuthProvider({ children }) {
     const saved = localStorage.getItem('splitmate_auth_user');
     return saved ? JSON.parse(saved) : MOCK_USERS[0];
   });
+<<<<<<< HEAD
+=======
+  const [token, setToken] = useState(() => {
+    return localStorage.getItem('splitmate_token') || null;
+  });
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return Boolean(localStorage.getItem('splitmate_token') || localStorage.getItem('splitmate_auth_user'));
+  });
+>>>>>>> feature/paypal-sandbox
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -29,6 +38,16 @@ export function AuthProvider({ children }) {
       localStorage.setItem('splitmate_is_authenticated', 'false');
     }
   }, [currentUser, isAuthenticated]);
+
+  useEffect(() => {
+    if (token) {
+      localStorage.setItem('splitmate_token', token);
+      apiClient.setAuthToken(token);
+    } else {
+      localStorage.removeItem('splitmate_token');
+      apiClient.setAuthToken(null);
+    }
+  }, [token]);
 
   // Demo user quick-switch (essential for hackathon team demonstration)
   const switchUser = (userId) => {
@@ -53,7 +72,17 @@ export function AuthProvider({ children }) {
         body: JSON.stringify({ email: email.trim(), password: password.trim() }),
       });
 
+<<<<<<< HEAD
       const user = MOCK_USERS.find((u) => u.email.toLowerCase() === email.trim().toLowerCase()) || {
+=======
+      if (result.access_token) {
+        setToken(result.access_token);
+        localStorage.setItem('splitmate_token', result.access_token);
+        apiClient.setAuthToken(result.access_token);
+      }
+
+      const user = result.user || MOCK_USERS.find((u) => u.email === email) || {
+>>>>>>> feature/paypal-sandbox
         id: `usr_${Date.now()}`,
         name: email.split('@')[0],
         email: email.trim(),
@@ -64,9 +93,13 @@ export function AuthProvider({ children }) {
 
       setCurrentUser(user);
       setIsAuthenticated(true);
+<<<<<<< HEAD
       localStorage.setItem('splitmate_auth_user', JSON.stringify(user));
       localStorage.setItem('splitmate_is_authenticated', 'true');
       return { success: true, user };
+=======
+      return { success: true, user, token: result.access_token };
+>>>>>>> feature/paypal-sandbox
     } catch (err) {
       return { success: false, error: err.message || 'Login failed. Please check your credentials.' };
     } finally {
@@ -77,6 +110,7 @@ export function AuthProvider({ children }) {
   const register = async (userData) => {
     setIsLoading(true);
     try {
+<<<<<<< HEAD
       if (!userData?.name?.trim() || !userData?.email?.trim() || !userData?.password?.trim()) {
         throw new Error('Name, email, and password are required.');
       }
@@ -90,6 +124,24 @@ export function AuthProvider({ children }) {
       });
 
       const newUser = {
+=======
+      const result = await apiClient.request(API_ENDPOINTS.AUTH.REGISTER, {
+        method: 'POST',
+        body: JSON.stringify({
+          name: userData.name,
+          email: userData.email,
+          password: userData.password,
+        }),
+      });
+
+      if (result.access_token) {
+        setToken(result.access_token);
+        localStorage.setItem('splitmate_token', result.access_token);
+        apiClient.setAuthToken(result.access_token);
+      }
+
+      const user = result.user || {
+>>>>>>> feature/paypal-sandbox
         id: `usr_${Date.now()}`,
         name: userData.name.trim(),
         email: userData.email.trim(),
@@ -97,12 +149,18 @@ export function AuthProvider({ children }) {
         paypalEmail: userData.paypalEmail?.trim() || `${userData.email.split('@')[0]}@sandbox.paypal.com`,
         role: 'Team Member',
       };
+<<<<<<< HEAD
 
       setCurrentUser(newUser);
       setIsAuthenticated(true);
       localStorage.setItem('splitmate_auth_user', JSON.stringify(newUser));
       localStorage.setItem('splitmate_is_authenticated', 'true');
       return { success: true, user: newUser };
+=======
+      setCurrentUser(user);
+      setIsAuthenticated(true);
+      return { success: true, user, token: result.access_token };
+>>>>>>> feature/paypal-sandbox
     } catch (err) {
       return { success: false, error: err.message || 'Registration failed.' };
     } finally {
@@ -112,6 +170,10 @@ export function AuthProvider({ children }) {
 
   const logout = () => {
     setCurrentUser(null);
+    setToken(null);
+    localStorage.removeItem('splitmate_auth_user');
+    localStorage.removeItem('splitmate_token');
+    apiClient.setAuthToken(null);
     setIsAuthenticated(false);
     localStorage.removeItem('splitmate_auth_user');
     localStorage.setItem('splitmate_is_authenticated', 'false');
@@ -125,6 +187,7 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider
       value={{
         currentUser,
+        token,
         isAuthenticated,
         isLoading,
         allUsers: MOCK_USERS,
