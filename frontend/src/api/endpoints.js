@@ -1,15 +1,15 @@
 /**
  * SplitMate API Contract & Endpoints
  * 
- * Agreed REST API contracts for FastAPI backend (Tanishq),
+ * Production REST API contracts for FastAPI backend (Tanishq),
  * AI receipt extraction (Pawan), and PayPal Sandbox (Tanay).
  */
 
 export const API_ENDPOINTS = {
-  // Backend Health & System Status (Tanishq)
+  // Backend Health & System Status
   HEALTH: '/health',
 
-  // Authentication & User Profile (Tanishq)
+  // Authentication & User Profile
   AUTH: {
     LOGIN: '/auth/login',
     REGISTER: '/auth/register',
@@ -17,43 +17,49 @@ export const API_ENDPOINTS = {
     UPDATE_PROFILE: '/auth/profile',
   },
 
-  // Groups & Members (Tanishq)
+  // Groups & Members
   GROUPS: {
     LIST: '/groups',
     CREATE: '/groups',
     DETAILS: (groupId) => `/groups/${groupId}`,
     ADD_MEMBER: (groupId) => `/groups/${groupId}/members`,
-    BALANCES: (groupId) => `/groups/${groupId}/balances`,
+    MEMBERS: (groupId) => `/groups/${groupId}/members`,
   },
 
-  // Expense Management (Tanishq)
+  // Expense Management
   EXPENSES: {
     LIST: '/expenses',
+    LIST_BY_GROUP: (groupId) => `/expenses/group/${groupId}`,
     CREATE: '/expenses',
     DETAILS: (expenseId) => `/expenses/${expenseId}`,
-    DELETE: (expenseId) => `/expenses/${expenseId}`,
-    SETTLE: '/expenses/settle',
+    ASSIGN: (expenseId) => `/expenses/${expenseId}/assign`,
+    SPLITS: (expenseId) => `/expenses/${expenseId}/splits`,
+    INITIALIZE_PAYMENTS: (expenseId) => `/expenses/${expenseId}/initialize-payments`,
   },
 
-  // AI Receipt Extraction (Pawan)
+  // AI Receipt Extraction & Review
   RECEIPTS: {
     UPLOAD: '/receipts/upload',
+    DETAILS: (receiptId) => `/receipts/${receiptId}`,
+    EXTRACT: (receiptId) => `/receipts/${receiptId}/extract`,
+    IMAGE: (receiptId) => `/receipts/${receiptId}/image`,
+    UPDATE_ITEMS: (receiptId) => `/receipts/${receiptId}/items`,
     SUBMIT_EXTRACTION: (receiptId) => `/receipts/${receiptId}/extraction`,
     SAMPLE_RECEIPTS: '/receipts/samples',
   },
 
-  // PayPal Sandbox Integration (Tanay)
+  // PayPal Sandbox Integration
   PAYMENTS: {
-    CREATE_ORDER: '/payments/paypal/create-order',
-    CAPTURE_ORDER: '/payments/paypal/capture-order',
-    HISTORY: '/payments/history',
+    DETAILS: (paymentId) => `/payments/${paymentId}`,
+    CREATE_ORDER: (paymentId) => `/payments/${paymentId}/create-order`,
+    CAPTURE_ORDER: (paymentId) => `/payments/${paymentId}/capture`,
+    LIST_BY_EXPENSE: (expenseId) => `/payments/expense/${expenseId}`,
   },
 
-  // Analytics & Insights (Tanishq / Dhruv)
+  // Analytics & Insights
   ANALYTICS: {
     SUMMARY: '/analytics/summary',
     CATEGORIES: '/analytics/categories',
     DEBT_GRAPH: '/analytics/debt-simplification',
   }
 };
-

@@ -84,10 +84,14 @@ class ImagePreprocessor:
             gray = cv2_img
 
         if cv2 is not None:
+            if gray.shape[0] < 2 or gray.shape[1] < 2:
+                return 0.0, True
             laplacian = cv2.Laplacian(gray, cv2.CV_64F)
             score = float(laplacian.var())
         else:
             # Simple fallback gradient variance if cv2 is absent
+            if gray.shape[0] < 2 or gray.shape[1] < 2:
+                return 0.0, True
             gy, gx = np.gradient(gray.astype(float))
             gnorm = np.sqrt(gx**2 + gy**2)
             score = float(np.var(gnorm))

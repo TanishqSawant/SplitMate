@@ -1,8 +1,8 @@
-"""Payment endpoints — interface only. Tanay owns the PayPal integration."""
+"""Payment endpoints for PayPal sandbox order creation, capture, and verification."""
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -12,6 +12,7 @@ from app.schemas.schemas import (
     PaymentCreateOrderRequest,
     PaymentResponse,
 )
+from app.services.paypal import paypal_service
 
 router = APIRouter(prefix="/api/payments", tags=["Payments"])
 
@@ -19,11 +20,11 @@ router = APIRouter(prefix="/api/payments", tags=["Payments"])
 @router.post(
     "/{payment_id}/create-order",
     response_model=PaymentResponse,
-    summary="Create a PayPal order for a payment (Tanay implements)",
+    summary="Create a PayPal order for a payment",
 )
 def create_paypal_order(
     payment_id: uuid.UUID,
-    body: PaymentCreateOrderRequest,
+    body: PaymentCreateOrderRequest | None = None,
     db: Session = Depends(get_db),
 ):
     payment = db.get(Payment, payment_id)
@@ -42,27 +43,28 @@ def create_paypal_order(
             detail="A PayPal order has already been created for this payment.",
         )
 
-    # -----------------------------------------------------------------------
-    # TODO (Tanay): Integrate PayPal Orders API here.
-    #
-    # 1. Call PayPal Create Order endpoint with payment.amount and payment.currency.
-    # 2. Set payment.paypal_order_id = response order ID.
-    # 3. Set payment.status = PaymentStatus.ORDER_CREATED.
-    # 4. Commit and return updated payment.
-    #
-    # Do NOT mark payment as captured here.
-    # -----------------------------------------------------------------------
+    try:
+        order_data = paypal_service.create_order(
+            amount=payment.amount,
+            currency=payment.currency,
+            reference_id=str(payment.id),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=502, detail=f"PayPal order creation failed: {e}"
+        )
 
-    raise HTTPException(
-        status_code=501,
-        detail="PayPal order creation not implemented. Tanay will integrate this.",
-    )
+    payment.paypal_order_id = order_data["id"]
+    payment.status = PaymentStatus.ORDER_CREATED
+    db.commit()
+    db.refresh(payment)
+    return payment
 
 
 @router.post(
     "/{payment_id}/capture",
     response_model=PaymentResponse,
-    summary="Capture a PayPal payment (Tanay implements)",
+    summary="Capture a PayPal payment and verify server-side status",
 )
 def capture_payment(
     payment_id: uuid.UUID,
@@ -89,22 +91,22 @@ def capture_payment(
             detail="PayPal order ID does not match the payment record.",
         )
 
-    # -----------------------------------------------------------------------
-    # TODO (Tanay): Integrate PayPal Capture endpoint here.
-    #
-    # 1. Call PayPal Capture Order endpoint with body.paypal_order_id.
-    # 2. Verify capture was successful server-side (never trust frontend).
-    # 3. Set payment.paypal_capture_id = response capture ID.
-    # 4. Set payment.status = PaymentStatus.CAPTURED.
-    # 5. Commit and return updated payment.
-    #
-    # On failure: set payment.status = PaymentStatus.FAILED and commit.
-    # -----------------------------------------------------------------------
+    try:
+        capture_result = paypal_service.capture_payment(body.paypal_order_id)
+    except Exception as e:
+        payment.status = PaymentStatus.FAILED
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"PayPal capture failed: {e}")
 
-    raise HTTPException(
-        status_code=501,
-        detail="PayPal capture not implemented. Tanay will integrate this.",
-    )
+    if capture_result.get("status") == "COMPLETED":
+        payment.paypal_capture_id = capture_result.get("capture_id")
+        payment.status = PaymentStatus.CAPTURED
+    else:
+        payment.status = PaymentStatus.FAILED
+
+    db.commit()
+    db.refresh(payment)
+    return payment
 
 
 @router.get(
@@ -118,3 +120,11 @@ def get_payment(payment_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Payment not found.")
     return payment
 
+
+@router.get(
+    "/expense/{expense_id}",
+    response_model=list[PaymentResponse],
+    summary="List all payments for an expense",
+)
+def list_expense_payments(expense_id: uuid.UUID, db: Session = Depends(get_db)):
+    return db.query(Payment).filter(Payment.expense_id == expense_id).all()

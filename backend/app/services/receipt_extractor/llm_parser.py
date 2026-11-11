@@ -9,12 +9,15 @@ Adheres strictly to the requirements:
 
 from decimal import Decimal
 import json
+import logging
 import os
 import re
 from typing import Any
 from PIL import Image
 
 from .schemas import ExtractedLineItem, ReceiptExtractionResult
+
+logger = logging.getLogger(__name__)
 
 
 RECEIPT_SYSTEM_PROMPT = """You are an expert financial receipt analysis AI for SplitMate.
@@ -65,8 +68,8 @@ class RegexHeuristicFallback:
     ]
 
     DATE_PATTERNS = [
-        r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",  # YYYY-MM-DD
-        r"\b(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\b",  # MM/DD/YYYY or DD/MM/YYYY
+        r"(?:^|[^\d])(\d{4}[-/]\d{1,2}[-/]\d{1,2})(?:[^\d]|$)",  # YYYY-MM-DD
+        r"(?:^|[^\d])(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})(?:[^\d]|$)",  # MM/DD/YYYY or DD/MM/YYYY
         r"\b([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\b",  # Nov 09, 2026
     ]
 
@@ -79,7 +82,7 @@ class RegexHeuristicFallback:
     ]
 
     TAX_PATTERNS = [
-        r"\b(?:tax|gst|vat|sales\s+tax|hst)\b[\s:]*[$€£₹]?\s*([0-9]+[.,][0-9]{2})",
+        r"(?:tax|gst|vat|sales\s+tax|hst)(?:\s*\(\d+(?:\.\d+)?%\))?[\s:]*[$€£₹]?\s*([0-9]+[.,][0-9]{2})",
     ]
 
     DISCOUNT_PATTERNS = [
@@ -156,32 +159,120 @@ class RegexHeuristicFallback:
         final_total = extract_amount(self.TOTAL_PATTERNS)
 
         # 6. Line items parsing
+        logger.debug("RegexFallback parsing %d lines; preview: %s", len(lines), text[:300].replace("\n", " | "))
         items: list[ExtractedLineItem] = []
+        skip_exact = [
+            "subtotal", "sub total", "sub-total", "tax", "sales tax", "vat", "gst", "hst",
+            "tip", "gratuity", "balance", "amount due", "balance due", "payment method",
+            "auth code", "approval code", "visa", "mastercard", "amex", "discover",
+            "apple pay", "google pay", "cash", "change",
+            "thank you", "thanks for", "have a great", "have a nice", "store:", "date:",
+            "receipt #", "invoice #", "order #",
+        ]
+        curr = r"[$€£₹]?"
+        num = r"\d+[.,]\d{2}"
+
         for line in lines:
-            # Skip summary lines
             lower = line.lower()
-            if any(skip in lower for skip in ["total", "subtotal", "tax", "vat", "gst", "tip", "balance", "visa", "mastercard", "change", "cash"]):
+            if any(k in lower for k in skip_exact):
                 continue
 
-            # Look for: Name ... [qty] ... price
-            # e.g., "Margherita Pizza 2 18.00" or "Margherita Pizza $18.00"
-            item_match = re.search(r"^([A-Za-z0-9\s\-\&\'\.]+?)\s+(?:(\d+)\s+)?(?:[$€£₹]?\s*)(\d+[.,]\d{2})$", line)
-            if item_match:
-                name = item_match.group(1).strip()
-                qty_str = item_match.group(2)
-                price_str = item_match.group(3).replace(",", ".")
-                if len(name) >= 2:
-                    qty = int(qty_str) if qty_str else 1
-                    tot_price = Decimal(price_str)
-                    unit_p = tot_price / qty
-                    items.append(
-                        ExtractedLineItem(
-                            item_name=name,
+            # Skip table headers like "Item Qty Price Total"
+            if ("item" in lower or "description" in lower) and ("price" in lower or "qty" in lower or "total" in lower):
+                continue
+
+            # Skip standalone or summary total lines
+            if re.search(r"\b(?:grand\s+total|total)\b", lower):
+                continue
+
+            item_obj = None
+
+            # Case 1: Two prices at the end: ... [qty/unit] price1 price2
+            # e.g., "Organic Bananas 1.00 1b $1.29 $1.29" or "Whole Milk (1 gal) $4.49 $4.49"
+            m2 = re.search(
+                rf"^(.+?)\s+{curr}\s*({num})\s+{curr}\s*({num})$",
+                line
+            )
+            if m2:
+                raw_name = m2.group(1).strip()
+                price1_str = m2.group(2).replace(",", ".")
+                price2_str = m2.group(3).replace(",", ".")
+
+                unit_p = Decimal(price1_str)
+                tot_p = Decimal(price2_str)
+                qty = 1
+
+                # Clean trailing quantity/weight from raw_name if not parenthesized
+                if not raw_name.endswith(")"):
+                    for pat in [
+                        r"^(.*?)\s+(\d+(?:\.\d+)?)\s+(?:lb|1b|ea|kg|g|oz|pk|ct|[a-zA-Z]{1,4})$",
+                        r"^(.*?)\s+(\d+(?:\.\d+)?)$",
+                    ]:
+                        qm = re.search(pat, raw_name)
+                        if qm and len(qm.group(1).strip()) >= 2:
+                            raw_name = qm.group(1).strip()
+                            try:
+                                val = float(qm.group(2))
+                                qty = max(1, int(round(val)))
+                            except Exception:
+                                pass
+                            break
+
+                # Reconcile unit_p and tot_p with qty
+                if qty > 1 and unit_p > 0 and tot_p == unit_p:
+                    qty = 1
+
+                if len(raw_name) >= 2:
+                    item_obj = ExtractedLineItem(
+                        item_name=raw_name,
+                        quantity=qty,
+                        unit_price=unit_p,
+                        total_price=tot_p,
+                    )
+
+            # Case 2: Single price at the end: ... [qty] price
+            # e.g., "Margherita Pizza 2 18.00" or "Organic Bananas $ 1.29"
+            if not item_obj:
+                m1 = re.search(
+                    rf"^(.+?)\s+(?:(\d+)\s+)?{curr}\s*({num})$",
+                    line
+                )
+                if m1:
+                    raw_name = m1.group(1).strip()
+                    raw_qty = m1.group(2)
+                    price_str = m1.group(3).replace(",", ".")
+
+                    qty = int(raw_qty) if raw_qty else 1
+                    tot_p = Decimal(price_str)
+                    unit_p = tot_p / qty
+
+                    # Clean trailing quantity/weight from raw_name if not parenthesized
+                    if not raw_name.endswith(")") and not raw_qty:
+                        for pat in [
+                            r"^(.*?)\s+(\d+(?:\.\d+)?)\s+(?:lb|1b|ea|kg|g|oz|pk|ct|[a-zA-Z]{1,4})$",
+                            r"^(.*?)\s+(\d+(?:\.\d+)?)$",
+                        ]:
+                            qm = re.search(pat, raw_name)
+                            if qm and len(qm.group(1).strip()) >= 2:
+                                raw_name = qm.group(1).strip()
+                                try:
+                                    val = float(qm.group(2))
+                                    qty = max(1, int(round(val)))
+                                    unit_p = tot_p / qty
+                                except Exception:
+                                    pass
+                                break
+
+                    if len(raw_name) >= 2:
+                        item_obj = ExtractedLineItem(
+                            item_name=raw_name,
                             quantity=qty,
                             unit_price=unit_p,
-                            total_price=tot_price,
+                            total_price=tot_p,
                         )
-                    )
+
+            if item_obj:
+                items.append(item_obj)
 
         # Confidence calculation for fallback: maximum 0.35
         confidence = 0.20
@@ -286,6 +377,22 @@ class GeminiVisionExtractor:
 
         except Exception as e:
             # Cleanly catch and document API failure without crashing
-            api_warn = f"Gemini Vision API extraction failed ({type(e).__name__}: {str(e)}). Engaging fallback parser."
+            err_str = str(e)
+            if "403" in err_str or "PERMISSION_DENIED" in err_str or "billing" in err_str.lower():
+                api_warn = (
+                    "Gemini Vision API returned 403 PERMISSION_DENIED. "
+                    "The free tier is not available for this Google Cloud project; billing must be enabled. "
+                    "Falling back to offline RapidOCR + regex extraction."
+                )
+            elif "getaddrinfo" in err_str or "ConnectError" in err_str or "network" in err_str.lower():
+                api_warn = (
+                    f"Gemini Vision API is unreachable (network error: {type(e).__name__}). "
+                    "Using offline RapidOCR + regex extraction."
+                )
+            else:
+                api_warn = (
+                    f"Gemini Vision API extraction failed ({type(e).__name__}: {err_str}). "
+                    "Engaging fallback parser."
+                )
             warnings.append(api_warn)
             return self.fallback_parser.parse_text(text_context, initial_warnings=warnings)

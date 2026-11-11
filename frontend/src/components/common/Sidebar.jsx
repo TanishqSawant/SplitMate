@@ -73,9 +73,8 @@ export default function Sidebar({ currentView, onNavigate, isOpen, onClose }) {
 
       {/* Sidebar container */}
       <aside
-        className={`fixed lg:sticky top-16 z-30 h-[calc(100vh-4rem)] w-64 bg-white dark:bg-slate-900 border-r border-slate-200/80 dark:border-slate-800 flex flex-col justify-between p-4 transition-transform duration-200 ease-in-out ${
-          isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
-        }`}
+        className={`fixed lg:sticky top-16 z-30 h-[calc(100vh-4rem)] w-64 bg-white dark:bg-slate-900 border-r border-slate-200/80 dark:border-slate-800 flex flex-col justify-between p-4 transition-transform duration-200 ease-in-out ${isOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+          }`}
       >
         <div className="space-y-6">
           {/* Main Navigation links */}
@@ -93,19 +92,17 @@ export default function Sidebar({ currentView, onNavigate, isOpen, onClose }) {
                     onNavigate(item.id);
                     if (onClose) onClose();
                   }}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-all group ${
-                    isActive
-                      ? 'bg-blue-50 dark:bg-blue-950/50 text-[#0070BA] dark:text-blue-400 shadow-xs'
-                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100/70 dark:hover:bg-slate-800/50'
-                  }`}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm font-medium transition-all group ${isActive
+                    ? 'bg-blue-50 dark:bg-blue-950/50 text-[#0070BA] dark:text-blue-400 shadow-xs'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100/70 dark:hover:bg-slate-800/50'
+                    }`}
                 >
                   <div className="flex items-center gap-3">
                     <Icon
-                      className={`w-5 h-5 transition-colors ${
-                        isActive
-                          ? 'text-[#0070BA] dark:text-blue-400'
-                          : 'text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-300'
-                      }`}
+                      className={`w-5 h-5 transition-colors ${isActive
+                        ? 'text-[#0070BA] dark:text-blue-400'
+                        : 'text-slate-400 group-hover:text-slate-600 dark:group-hover:text-slate-300'
+                        }`}
                     />
                     <span>{item.label}</span>
                   </div>
@@ -133,7 +130,7 @@ export default function Sidebar({ currentView, onNavigate, isOpen, onClose }) {
             </p>
             <div className="mt-3 pt-2.5 border-t border-blue-200/50 dark:border-blue-800/40 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
               <span>Deadline: Nov 13</span>
-              <span className="font-semibold text-emerald-600 dark:text-emerald-400">Phase 1 Complete</span>
+              <span className="font-semibold text-emerald-600 dark:text-emerald-400">Production Ready</span>
             </div>
           </div>
         </div>

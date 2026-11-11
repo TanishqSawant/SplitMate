@@ -32,11 +32,23 @@ export default function AddExpenseModal({ isOpen, onClose }) {
 
     setIsSubmitting(true);
     try {
-      const splitDetails = groupMembers.map((member) => ({
-        userId: member.id,
-        share: Number(equalShare.toFixed(2)),
-        isPaid: member.id === paidBy,
-      }));
+      const totalCents = Math.round(parsedAmount * 100);
+      const memberCount = groupMembers.length;
+      const baseShareCents = Math.floor(totalCents / memberCount);
+      let remainderCents = totalCents % memberCount;
+
+      const splitDetails = groupMembers.map((member) => {
+        let memberCents = baseShareCents;
+        if (remainderCents > 0) {
+          memberCents += 1;
+          remainderCents -= 1;
+        }
+        return {
+          userId: member.id,
+          share: Number((memberCents / 100).toFixed(2)),
+          isPaid: member.id === paidBy,
+        };
+      });
 
       await addExpense({
         description,

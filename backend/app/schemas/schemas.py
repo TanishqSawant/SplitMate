@@ -17,11 +17,55 @@ class HealthResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Authentication & User
+# ---------------------------------------------------------------------------
+
+class UserRegisterRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["Dhruv Patil"])
+    email: EmailStr = Field(..., examples=["dhruv@splitmate.io"])
+    password: str = Field(..., min_length=6, max_length=128)
+    paypal_email: str | None = Field(default=None, max_length=320)
+    avatar: str | None = Field(default=None, max_length=500)
+
+
+class UserLoginRequest(BaseModel):
+    email: EmailStr = Field(..., examples=["dhruv@splitmate.io"])
+    password: str = Field(..., min_length=1)
+
+
+class UserProfileUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    paypal_email: str | None = Field(default=None, max_length=320)
+    avatar: str | None = Field(default=None, max_length=500)
+
+
+class UserResponse(BaseModel):
+    id: UUID
+    email: str
+    name: str
+    paypal_email: str | None = None
+    avatar: str | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AuthTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+# ---------------------------------------------------------------------------
 # ExpenseGroup
 # ---------------------------------------------------------------------------
 
 class GroupCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, examples=["Dinner at Mario's"])
+
+
+class GroupUpdate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["Dinner at Mario's (Updated)"])
 
 
 class GroupResponse(BaseModel):
@@ -89,6 +133,21 @@ class ReceiptItemExtraction(BaseModel):
     total_price: Decimal = Field(..., ge=0, decimal_places=2)
 
 
+class ReceiptItemUpdate(BaseModel):
+    id: UUID | None = None
+    item_name: str = Field(..., min_length=1, max_length=255)
+    quantity: int = Field(default=1, ge=1)
+    unit_price: Decimal = Field(default=Decimal("0.00"), ge=0, decimal_places=2)
+    total_price: Decimal = Field(default=Decimal("0.00"), ge=0, decimal_places=2)
+
+
+class ReceiptItemsUpdateRequest(BaseModel):
+    merchant_name: str | None = None
+    currency: str | None = None
+    tax: Decimal | None = None
+    items: list[ReceiptItemUpdate] = Field(..., min_length=1)
+
+
 class ReceiptExtractionRequest(BaseModel):
     """Payload that Pawan's AI extraction service submits after processing a receipt."""
     merchant_name: str = Field(..., min_length=1, max_length=255, examples=["Mario's Pizzeria"])
@@ -97,6 +156,22 @@ class ReceiptExtractionRequest(BaseModel):
     tax: Decimal = Field(..., ge=0, decimal_places=2, examples=[3.64])
     total: Decimal = Field(..., ge=0, decimal_places=2, examples=[49.14])
     items: list[ReceiptItemExtraction] = Field(..., min_length=1)
+
+
+class SampleReceiptItem(BaseModel):
+    name: str
+    price: Decimal
+    quantity: int = 1
+
+
+class SampleReceiptResponse(BaseModel):
+    id: str
+    name: str
+    merchant: str
+    date: str
+    total: Decimal
+    category: str
+    items: list[SampleReceiptItem]
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +183,11 @@ class ExpenseCreate(BaseModel):
     receipt_id: UUID | None = None
     total_amount: Decimal = Field(..., gt=0, decimal_places=2)
     currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
+class ExpenseUpdate(BaseModel):
+    total_amount: Decimal | None = Field(default=None, gt=0, decimal_places=2)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
 
 
 class ExpenseResponse(BaseModel):

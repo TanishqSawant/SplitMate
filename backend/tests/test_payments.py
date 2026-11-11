@@ -1,17 +1,18 @@
-"""Tests for the payments API (interface validation only — PayPal is not integrated)."""
-
+"""Tests for the PayPal payment lifecycle (order creation, capture, duplicate prevention, status transitions)."""
 
 import io
+import uuid
 
+from app.models.models import Payment, PaymentStatus
 from tests.conftest import TEST_INTERNAL_SERVICE_SECRET, VALID_JPEG_BYTES
 
 AI_KEY_HEADER = {"X-Internal-Service-Key": TEST_INTERNAL_SERVICE_SECRET}
 
 
 def _create_payment_setup(client):
-    """Helper: create group → members → receipt → expense → splits → return payment."""
+    """Helper: create group -> members -> receipt -> expense -> splits -> return payment_id."""
     # Group + member
-    group_resp = client.post("/api/groups", json={"name": "Payment Test"})
+    group_resp = client.post("/api/groups", json={"name": "Payment Test Group"})
     group_id = group_resp.json()["id"]
     member_resp = client.post(
         f"/api/groups/{group_id}/members",
@@ -19,7 +20,7 @@ def _create_payment_setup(client):
     )
     member_id = member_resp.json()["id"]
 
-    # Receipt + extraction (use valid JPEG magic bytes)
+    # Receipt + extraction
     upload_resp = client.post(
         "/api/receipts/upload",
         files={"file": ("r.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
@@ -28,38 +29,39 @@ def _create_payment_setup(client):
     client.post(
         f"/api/receipts/{receipt_id}/extraction",
         json={
-            "merchant_name": "Test",
+            "merchant_name": "Test Restaurant",
             "currency": "USD",
-            "subtotal": "10.00",
-            "tax": "0.80",
-            "total": "10.80",
+            "subtotal": "20.00",
+            "tax": "1.60",
+            "total": "21.60",
             "items": [
                 {
                     "item_name": "Salad",
                     "quantity": 1,
-                    "unit_price": "10.00",
-                    "total_price": "10.00",
+                    "unit_price": "20.00",
+                    "total_price": "20.00",
                 }
             ],
         },
         headers=AI_KEY_HEADER,
     )
+
     receipt_data = client.get(f"/api/receipts/{receipt_id}").json()
     item_id = receipt_data["items"][0]["id"]
 
-    # Expense (amount must match extracted total: 10.80)
+    # Expense
     expense_resp = client.post(
         "/api/expenses",
         json={
             "group_id": group_id,
             "receipt_id": receipt_id,
-            "total_amount": "10.80",
+            "total_amount": "21.60",
             "currency": "USD",
         },
     )
     expense_id = expense_resp.json()["id"]
 
-    # Assign and calculate split
+    # Assign item
     client.post(
         f"/api/expenses/{expense_id}/assign",
         json={
@@ -72,90 +74,119 @@ def _create_payment_setup(client):
             ]
         },
     )
-    splits_resp = client.get(f"/api/expenses/{expense_id}/splits")
-    assert splits_resp.status_code == 200
 
-    # Initialize payment via the dedicated POST endpoint
+    # Initialize payments
     init_resp = client.post(f"/api/expenses/{expense_id}/initialize-payments")
     assert init_resp.status_code == 201
-
-    # Find the payment that was created
-    from app.models.models import Payment
-    from app.db.session import get_db
-
-    # Use the overridden db to query
-    # Since we can't easily get the payment ID from splits, query via expense
-    from sqlalchemy import select
-
-    # Get db session from the dependency override
-    db_gen = client.app.dependency_overrides[get_db]()
-    db = next(db_gen)
-    payment = db.query(Payment).filter(Payment.expense_id == expense_id).first()
-    return payment.id
+    payments = init_resp.json()
+    assert len(payments) == 1
+    return payments[0]["id"], expense_id
 
 
 def test_get_payment(client):
-    payment_id = _create_payment_setup(client)
+    payment_id, _ = _create_payment_setup(client)
     response = client.get(f"/api/payments/{payment_id}")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "pending"
+    assert data["amount"] == "21.60"
+    assert data["currency"] == "USD"
 
 
 def test_get_payment_not_found(client):
-    response = client.get("/api/payments/00000000-0000-0000-0000-000000000000")
+    response = client.get(f"/api/payments/{uuid.uuid4()}")
     assert response.status_code == 404
 
 
-def test_create_order_returns_501(client):
-    """PayPal integration is not implemented — should return 501."""
-    payment_id = _create_payment_setup(client)
+def test_create_order_success(client):
+    """Creating a PayPal order should move status to order_created and set paypal_order_id."""
+    payment_id, _ = _create_payment_setup(client)
     response = client.post(f"/api/payments/{payment_id}/create-order", json={})
-    assert response.status_code == 501
-
-
-def test_capture_returns_409_for_pending(client):
-    """Cannot capture a payment that has not had an order created."""
-    payment_id = _create_payment_setup(client)
-    response = client.post(
-        f"/api/payments/{payment_id}/capture",
-        json={"paypal_order_id": "FAKE-ORDER-123"},
-    )
-    # Should fail because status is 'pending', not 'order_created'
-    assert response.status_code == 409
-
-    db = next(db_gen)
-    payment = db.query(Payment).filter(Payment.expense_id == expense_id).first()
-    return payment.id
-
-
-def test_get_payment(client):
-    payment_id = _create_payment_setup(client)
-    response = client.get(f"/api/payments/{payment_id}")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "pending"
+    assert data["status"] == "order_created"
+    assert data["paypal_order_id"] is not None
+    assert len(data["paypal_order_id"]) > 0
 
 
-def test_get_payment_not_found(client):
-    response = client.get("/api/payments/00000000-0000-0000-0000-000000000000")
-    assert response.status_code == 404
+def test_create_order_conflict_when_already_created(client):
+    """Cannot create an order twice for the same payment."""
+    payment_id, _ = _create_payment_setup(client)
+    first_resp = client.post(f"/api/payments/{payment_id}/create-order", json={})
+    assert first_resp.status_code == 200
 
-
-def test_create_order_returns_501(client):
-    """PayPal integration is not implemented — should return 501."""
-    payment_id = _create_payment_setup(client)
-    response = client.post(f"/api/payments/{payment_id}/create-order", json={})
-    assert response.status_code == 501
+    second_resp = client.post(f"/api/payments/{payment_id}/create-order", json={})
+    assert second_resp.status_code == 409
 
 
 def test_capture_returns_409_for_pending(client):
-    """Cannot capture a payment that has not had an order created."""
-    payment_id = _create_payment_setup(client)
+    """Cannot capture a payment that is still in pending state (no order created)."""
+    payment_id, _ = _create_payment_setup(client)
     response = client.post(
         f"/api/payments/{payment_id}/capture",
         json={"paypal_order_id": "FAKE-ORDER-123"},
     )
-    # Should fail because status is 'pending', not 'order_created'
     assert response.status_code == 409
 
+
+def test_capture_success_flow(client):
+    """Full PayPal flow: pending -> order_created -> captured."""
+    payment_id, _ = _create_payment_setup(client)
+
+    # 1. Create order
+    order_resp = client.post(f"/api/payments/{payment_id}/create-order", json={})
+    assert order_resp.status_code == 200
+    paypal_order_id = order_resp.json()["paypal_order_id"]
+
+    # 2. Capture payment
+    capture_resp = client.post(
+        f"/api/payments/{payment_id}/capture",
+        json={"paypal_order_id": paypal_order_id},
+    )
+    assert capture_resp.status_code == 200
+    data = capture_resp.json()
+    assert data["status"] == "captured"
+    assert data["paypal_capture_id"] is not None
+
+
+def test_capture_duplicate_prevented(client):
+    """Capturing an already captured payment should return 409."""
+    payment_id, _ = _create_payment_setup(client)
+
+    # Create & capture
+    order_resp = client.post(f"/api/payments/{payment_id}/create-order", json={})
+    paypal_order_id = order_resp.json()["paypal_order_id"]
+
+    client.post(
+        f"/api/payments/{payment_id}/capture",
+        json={"paypal_order_id": paypal_order_id},
+    )
+
+    # Attempt second capture
+    dup_resp = client.post(
+        f"/api/payments/{payment_id}/capture",
+        json={"paypal_order_id": paypal_order_id},
+    )
+    assert dup_resp.status_code == 409
+    assert "already captured" in dup_resp.json()["detail"].lower()
+
+
+def test_capture_order_id_mismatch(client):
+    """Capture fails with 400 if order ID does not match payment record."""
+    payment_id, _ = _create_payment_setup(client)
+    client.post(f"/api/payments/{payment_id}/create-order", json={})
+
+    mismatch_resp = client.post(
+        f"/api/payments/{payment_id}/capture",
+        json={"paypal_order_id": "MISMATCHED-ORDER-ID"},
+    )
+    assert mismatch_resp.status_code == 400
+
+
+def test_list_expense_payments(client):
+    payment_id, expense_id = _create_payment_setup(client)
+    resp = client.get(f"/api/payments/expense/{expense_id}")
+    assert resp.status_code == 200
+    payments = resp.json()
+    assert len(payments) == 1
+    assert payments[0]["id"] == payment_id

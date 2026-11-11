@@ -41,21 +41,21 @@ export default function SettingsView() {
           <div className="p-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
             <p className="font-bold text-blue-600 dark:text-blue-400 mb-1">Tanishq (FastAPI):</p>
             <p className="leading-relaxed">
-              Base URL configured as <code>http://localhost:8000/api</code> in <code>.env</code>. Frontend automatically falls back to offline resilient mocks whenever server is offline!
+              Base URL configured as <code>http://localhost:8000/api</code> in <code>.env</code>. Frontend automatically falls back to offline resilient mode whenever server is offline.
             </p>
           </div>
 
           <div className="p-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
             <p className="font-bold text-purple-600 dark:text-purple-400 mb-1">Pawan (AI OCR):</p>
             <p className="leading-relaxed">
-              Endpoint is <code>POST /api/receipts/extract</code> expecting <code>multipart/form-data</code> with field name <code>receipt</code>.
+              Upload at <code>POST /api/receipts/upload?auto_extract=true</code> and review at <code>PUT /api/receipts/&#123;id&#125;/items</code> with RapidOCR offline engine.
             </p>
           </div>
 
           <div className="p-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
             <p className="font-bold text-[#0070BA] dark:text-blue-400 mb-1">Tanay (PayPal):</p>
             <p className="leading-relaxed">
-              Order creation at <code>/payments/paypal/create-order</code> and capture at <code>/payments/paypal/capture-order</code>.
+              Sandbox Order creation at <code>/api/payments/&#123;id&#125;/create-order</code> and capture at <code>/api/payments/&#123;id&#125;/capture</code>.
             </p>
           </div>
         </div>

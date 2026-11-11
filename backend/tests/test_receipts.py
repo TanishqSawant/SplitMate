@@ -234,3 +234,111 @@ def test_extraction_correct_ai_key_returns_200(client):
     assert response.status_code == 200
     assert response.json()["extraction_status"] == "completed"
 
+
+def test_trigger_extract_receipt(client):
+    """Trigger AI extraction on an uploaded receipt."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["id"]
+
+    extract_resp = client.post(f"/api/receipts/{receipt_id}/extract")
+    assert extract_resp.status_code == 200
+    data = extract_resp.json()
+    assert data["extraction_status"] == "completed"
+    assert len(data["items"]) > 0
+    assert data["total"] is not None
+
+
+def test_upload_and_extract_freshmart_real_receipt_regression(client):
+    """Regression test: uploading and extracting a real receipt image extracts line items correctly."""
+    upload_resp = _upload(client, "freshmart_receipt.png", VALID_PNG_BYTES, "image/png")
+    assert upload_resp.status_code == 201
+    receipt_id = upload_resp.json()["id"]
+
+    extract_resp = client.post(f"/api/receipts/{receipt_id}/extract")
+    assert extract_resp.status_code == 200
+    data = extract_resp.json()
+    assert data["extraction_status"] == "completed"
+    assert "fresh" in (data.get("merchant_name") or "").lower()
+    assert len(data["items"]) == 5
+    item_names = [it["item_name"] for it in data["items"]]
+    assert any("Bananas" in n for n in item_names)
+    assert any("Milk" in n for n in item_names)
+    assert any("Bread" in n for n in item_names)
+    assert any("Yogurt" in n for n in item_names)
+    assert any("Berries" in n for n in item_names)
+    assert str(data["total"]) == "15.82"
+    assert str(data["subtotal"]) == "14.65"
+    assert str(data["tax"]) == "1.17"
+
+
+def test_extract_corrupted_image_fails_gracefully(client):
+    """Corrupted image file must fail extraction gracefully with FAILED status and no mock data."""
+    # SOI marker + 100 nulls passes upload magic check but cannot be decoded by image engines
+    corrupted_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+    upload_resp = _upload(client, "corrupted.jpg", corrupted_bytes, "image/jpeg")
+    receipt_id = upload_resp.json()["id"]
+
+    extract_resp = client.post(f"/api/receipts/{receipt_id}/extract")
+    assert extract_resp.status_code == 200
+    data = extract_resp.json()
+    assert data["extraction_status"] == "failed"
+    assert len(data["items"]) == 0
+    assert data["total"] is None
+
+
+def test_update_receipt_items(client):
+    """Review and edit extracted items on a receipt."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["id"]
+
+    edit_payload = {
+        "merchant_name": "Edited Italian Bistro",
+        "currency": "USD",
+        "tax": "3.50",
+        "items": [
+            {
+                "item_name": "Custom Pizza",
+                "quantity": 2,
+                "unit_price": "14.00",
+                "total_price": "28.00",
+            },
+            {
+                "item_name": "Sparkling Water",
+                "quantity": 1,
+                "unit_price": "4.00",
+                "total_price": "4.00",
+            },
+        ],
+    }
+
+    update_resp = client.put(f"/api/receipts/{receipt_id}/items", json=edit_payload)
+    assert update_resp.status_code == 200
+    data = update_resp.json()
+    assert data["merchant_name"] == "Edited Italian Bistro"
+    assert data["subtotal"] == "32.00"
+    assert data["tax"] == "3.50"
+    assert data["total"] == "35.50"
+    assert len(data["items"]) == 2
+
+
+def test_get_receipt_image(client):
+    """Stream uploaded receipt image for UI preview."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["id"]
+
+    img_resp = client.get(f"/api/receipts/{receipt_id}/image")
+    assert img_resp.status_code == 200
+    assert len(img_resp.content) > 0
+
+
+def test_get_sample_receipts(client):
+    """Verify preloaded sample receipts endpoint returns valid items."""
+    resp = client.get("/api/receipts/samples")
+    assert resp.status_code == 200
+    samples = resp.json()
+    assert len(samples) == 3
+    sample_ids = [s["id"] for s in samples]
+    assert "rcpt_bistro" in sample_ids
+    assert "rcpt_wholefoods" in sample_ids
+    assert "rcpt_bluebottle" in sample_ids
+
