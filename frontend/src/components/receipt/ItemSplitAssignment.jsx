@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import { useAuth } from '../../context/AuthContext';
 import Button from '../common/Button';
@@ -20,43 +20,42 @@ export default function ItemSplitAssignment({ onFinalized }) {
   const data = receiptScan.extractedData;
   if (!data) return null;
 
+  const isCompleted = receiptScan.extractionStatus === 'completed' || data.extractionStatus === 'completed';
+  const isReviewRequired = receiptScan.extractionStatus === 'review_required' || data.extractionStatus === 'review_required';
+
   const currentSelectedGroup = groups.find((g) => g.id === selectedGroupId) || activeGroup;
   const groupMembers = currentSelectedGroup?.members
-    ? currentSelectedGroup.members.map((m) => allUsers.find((u) => u.id === m.userId)).filter(Boolean)
+    ? currentSelectedGroup.members.map((m) => {
+        // Handle both mock structure (userId) and backend structure (user_id)
+        const uid = m.userId || m.user_id;
+        return allUsers.find((u) => u.id === uid);
+      }).filter(Boolean)
     : allUsers;
 
   // Real-time calculation of member shares including pro-rated tax and tip
-  const itemsTotal = data.items.reduce((s, it) => s + (it.price || 0), 0);
-  const tax = data.tax || 0;
-  const tip = data.tip || 0;
-  const extraCharges = tax + tip;
-
   const memberBreakdown = groupMembers.map((member) => {
     let rawItemShare = 0;
-    data.items.forEach((item) => {
+    (data.items || []).forEach((item) => {
       const assigned = item.assignedTo || [];
-      if (assigned.includes(member.id)) {
-        rawItemShare += (item.price || 0) / assigned.length;
+      if (assigned.includes(member.id) && item.price != null) {
+        rawItemShare += item.price / assigned.length;
       }
     });
 
+    const itemsTotal = (data.items || []).reduce((s, it) => s + (it.price != null ? it.price : 0), 0);
+    const extraCharges = (data.tax || 0) + (data.tip || 0);
     const ratio = itemsTotal > 0 ? rawItemShare / itemsTotal : 0;
-    const allocatedTax = tax * ratio;
-    const allocatedTip = tip * ratio;
     const finalShare = rawItemShare + extraCharges * ratio;
 
     return {
       member,
       rawItemShare,
-      allocatedTax,
-      allocatedTip,
       finalShare: Number(finalShare.toFixed(2)),
     };
   });
 
-  const sumOfShares = memberBreakdown.reduce((sum, m) => sum + m.finalShare, 0);
-
   const handleFinalize = async () => {
+    if (!isCompleted) return;
     setIsSubmitting(true);
     try {
       await finalizeReceiptScan(selectedGroupId, paidByUserId);
@@ -78,8 +77,10 @@ export default function ItemSplitAssignment({ onFinalized }) {
           </p>
         </div>
 
-        <span className="text-lg font-black text-blue-600 dark:text-blue-400">
-          ${(data.total || 0).toFixed(2)}
+        <span className={`text-lg font-black ${data.total != null ? 'text-blue-600 dark:text-blue-400' : 'text-amber-500'}`}>
+          {data.total != null
+            ? `${data.currency ? data.currency + ' ' : '$'}${Number(data.total).toFixed(2)}`
+            : 'Total Missing'}
         </span>
       </div>
 
@@ -122,22 +123,17 @@ export default function ItemSplitAssignment({ onFinalized }) {
 
       {/* Real-time Calculated Shares Table */}
       <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-            Calculated Individual Shares (Items + Pro-Rated Tax & Tip)
-          </label>
-          <span className="text-[11px] font-mono text-slate-400">
-            Sum: ${sumOfShares.toFixed(2)} / Total: ${(data.total || 0).toFixed(2)}
-          </span>
-        </div>
+        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+          Calculated Individual Shares (Items + Pro-Rated Tax & Tip)
+        </label>
 
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
-          {memberBreakdown.map(({ member, rawItemShare, allocatedTax, allocatedTip, finalShare }) => {
+          {memberBreakdown.map(({ member, finalShare }) => {
             const isPayer = member.id === paidByUserId;
             return (
               <div
                 key={member.id}
-                className="flex flex-col sm:flex-row sm:items-center justify-between px-4 py-2.5 bg-slate-50/50 dark:bg-slate-800/40 text-xs gap-2"
+                className="flex items-center justify-between px-4 py-2.5 bg-slate-50/50 dark:bg-slate-800/40 text-xs"
               >
                 <div className="flex items-center gap-2.5">
                   <img
@@ -153,12 +149,9 @@ export default function ItemSplitAssignment({ onFinalized }) {
                       Paid Bill
                     </span>
                   )}
-                  <span className="text-[10px] text-slate-400 font-mono hidden md:inline">
-                    (${rawItemShare.toFixed(2)} items + ${(allocatedTax + allocatedTip).toFixed(2)} tax/tip)
-                  </span>
                 </div>
 
-                <div className="flex items-center justify-between sm:justify-end gap-2">
+                <div className="flex items-center gap-2">
                   <span className="font-mono font-bold text-slate-900 dark:text-white">
                     ${finalShare.toFixed(2)}
                   </span>
@@ -174,16 +167,31 @@ export default function ItemSplitAssignment({ onFinalized }) {
         </div>
       </div>
 
+      {/* Completion Gate Warning Notice */}
+      {!isCompleted && (
+        <div className="p-3.5 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 text-xs flex items-center gap-2.5">
+          <AlertCircle className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span>
+            Human review is required before this expense can be finalized or settled. Please submit your review corrections in the section above to complete extraction.
+          </span>
+        </div>
+      )}
+
       {/* Submit Button */}
       <Button
-        variant="primary"
+        variant={isCompleted ? "primary" : "secondary"}
         size="lg"
         icon={Sparkles}
         isLoading={isSubmitting}
+        disabled={!isCompleted || isSubmitting}
         onClick={handleFinalize}
-        className="w-full bg-gradient-to-r from-blue-600 via-indigo-600 to-[#0070BA] hover:from-blue-700 hover:to-blue-800 shadow-md py-3 text-base"
+        className={`w-full py-3 text-base ${
+          isCompleted
+            ? 'bg-gradient-to-r from-blue-600 via-indigo-600 to-[#0070BA] hover:from-blue-700 hover:to-blue-800 shadow-md'
+            : 'opacity-60 cursor-not-allowed bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400'
+        }`}
       >
-        Confirm & Split with Squad
+        {isCompleted ? 'Confirm & Split with Squad' : 'Complete Receipt Review First'}
       </Button>
     </div>
   );

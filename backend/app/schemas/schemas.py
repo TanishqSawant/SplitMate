@@ -1,10 +1,11 @@
-"""Pydantic schemas for request/response validation."""
+﻿"""Pydantic schemas for request/response validation."""
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -93,44 +94,124 @@ class ReceiptItemResponse(BaseModel):
     id: UUID
     receipt_id: UUID
     item_name: str
-    quantity: int
-    unit_price: Decimal
-    total_price: Decimal
+    quantity: Decimal | None
+    unit_price: Decimal | None
+    total_price: Decimal | None
 
     model_config = {"from_attributes": True}
 
 
 class ReceiptResponse(BaseModel):
-    id: UUID
+    receipt_id: UUID
     original_filename: str
+    document_type: str | None = None
     merchant_name: str | None
-    currency: str
+    currency: str | None
     subtotal: Decimal | None
     tax: Decimal | None
     total: Decimal | None
     extraction_status: str
+    missing_fields: list[str] | None = None
+    uncertain_fields: list[str] | None = None
+    warnings: list[str] | None = None
+    confidence: float | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    is_user_reviewed: bool = False
     created_at: datetime
     items: list[ReceiptItemResponse] = []
 
     model_config = {"from_attributes": True}
 
+    @classmethod
+    def from_orm_receipt(cls, receipt: Any) -> "ReceiptResponse":
+        """Build a ReceiptResponse from an ORM Receipt, deserializing JSON fields."""
+        import json
+
+        def _parse_json_list(val: str | None) -> list[str] | None:
+            if val is None:
+                return None
+            try:
+                parsed = json.loads(val)
+                return parsed if isinstance(parsed, list) else None
+            except Exception:
+                return None
+
+        return cls(
+            receipt_id=receipt.id,
+            original_filename=receipt.original_filename,
+            document_type=getattr(receipt, "document_type", None),
+            merchant_name=receipt.merchant_name,
+            currency=receipt.currency,
+            subtotal=receipt.subtotal,
+            tax=receipt.tax,
+            total=receipt.total,
+            extraction_status=receipt.extraction_status,
+            missing_fields=_parse_json_list(receipt.missing_fields),
+            uncertain_fields=_parse_json_list(receipt.uncertain_fields),
+            warnings=_parse_json_list(receipt.warnings),
+            confidence=receipt.confidence,
+            error_code=receipt.error_code,
+            error_message=receipt.error_message,
+            is_user_reviewed=receipt.is_user_reviewed,
+            created_at=receipt.created_at,
+            items=receipt.items,
+        )
+
 
 class ReceiptItemExtraction(BaseModel):
     """A single extracted item from the receipt (sent by Pawan's AI service)."""
-    item_name: str = Field(..., min_length=1, max_length=255)
-    quantity: int = Field(..., ge=1)
-    unit_price: Decimal = Field(..., ge=0, decimal_places=2)
-    total_price: Decimal = Field(..., ge=0, decimal_places=2)
+    item_name: str | None = Field(default=None, max_length=255)
+    quantity: Decimal | None = Field(default=None, gt=0, description="Positive quantity, may be fractional (e.g. 0.5 kg)")
+    unit_price: Decimal | None = Field(default=None, ge=0, decimal_places=2)
+    total_price: Decimal | None = Field(default=None, ge=0, decimal_places=2)
 
 
 class ReceiptExtractionRequest(BaseModel):
     """Payload that Pawan's AI extraction service submits after processing a receipt."""
-    merchant_name: str = Field(..., min_length=1, max_length=255, examples=["Mario's Pizzeria"])
-    currency: str = Field(default="USD", min_length=3, max_length=3)
-    subtotal: Decimal = Field(..., ge=0, decimal_places=2, examples=[45.50])
-    tax: Decimal = Field(..., ge=0, decimal_places=2, examples=[3.64])
-    total: Decimal = Field(..., ge=0, decimal_places=2, examples=[49.14])
-    items: list[ReceiptItemExtraction] = Field(..., min_length=1)
+    merchant_name: str | None = Field(default=None, max_length=255, examples=["Mario's Pizzeria"])
+    currency: str | None = Field(default=None, max_length=3)
+    subtotal: Decimal | None = Field(default=None, decimal_places=2, examples=[45.50])
+    tax: Decimal | None = Field(default=None, decimal_places=2, examples=[3.64])
+    total: Decimal | None = Field(default=None, decimal_places=2, examples=[49.14])
+    items: list[ReceiptItemExtraction] = Field(default_factory=list)
+    missing_fields: list[str] | None = None
+    uncertain_fields: list[str] | None = None
+    warnings: list[str] | None = None
+    confidence: float | None = None
+    document_type: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Receipt Extraction Initiation
+# ---------------------------------------------------------------------------
+
+class ReceiptExtractInitiatedResponse(BaseModel):
+    """Returned immediately after POST /api/receipts/extract is accepted."""
+    receipt_id: UUID
+    extraction_status: str
+
+
+# ---------------------------------------------------------------------------
+# Receipt Review Submission
+# ---------------------------------------------------------------------------
+
+class ReceiptItemReview(BaseModel):
+    """A single item submitted during human review of a receipt."""
+    item_name: str = Field(..., min_length=1, max_length=255)
+    quantity: Decimal = Field(..., gt=0, description="Positive quantity, may be fractional (e.g. 0.5 kg)")
+    unit_price: Decimal = Field(..., ge=0, decimal_places=2)
+    total_price: Decimal = Field(..., ge=0, decimal_places=2)
+
+
+class ReceiptReviewSubmission(BaseModel):
+    """Payload for PUT /api/receipts/{receipt_id}/review to manually correct extraction results."""
+    merchant_name: str | None = Field(default=None, max_length=255)
+    currency: str = Field(..., min_length=3, max_length=3, description="3-letter ISO currency code")
+    subtotal: Decimal | None = Field(default=None, ge=0, decimal_places=2)
+    tax: Decimal | None = Field(default=None, ge=0, decimal_places=2)
+    total: Decimal = Field(..., gt=0, decimal_places=2, description="Final confirmed total ΓÇö must be positive")
+    items: list[ReceiptItemReview] = Field(..., min_length=1, description="Reviewed line items ΓÇö at least one required")
 
 
 # ---------------------------------------------------------------------------
@@ -214,16 +295,14 @@ class SplitsResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class PaymentCreateOrderRequest(BaseModel):
-    """Triggers PayPal order creation. Tanay implements the actual integration."""
-    member_id: UUID | None = None
+    """Triggers PayPal order creation."""
     return_url: str | None = None
     cancel_url: str | None = None
 
 
 class PaymentCaptureRequest(BaseModel):
-    """Triggers PayPal capture. Tanay implements the actual integration."""
+    """Triggers PayPal capture."""
     paypal_order_id: str = Field(..., min_length=1, max_length=50)
-    member_id: UUID | None = None
 
 
 class PaymentResponse(BaseModel):
@@ -242,8 +321,17 @@ class PaymentResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+class ErrorResponse(BaseModel):
+    detail: str
+
+
 class PaymentDirectCreateOrderRequest(BaseModel):
     """Payload for frontend compatibility calling /api/payments/paypal/create-order."""
+
     payment_id: UUID | None = Field(default=None, alias="paymentId")
     payer_id: UUID | None = Field(default=None, alias="payerId")
     expense_id: UUID | None = Field(default=None, alias="expenseId")
@@ -254,21 +342,12 @@ class PaymentDirectCreateOrderRequest(BaseModel):
 
     model_config = {"populate_by_name": True}
 
-
 class PaymentDirectCaptureRequest(BaseModel):
     """Payload for frontend compatibility calling /api/payments/paypal/capture-order."""
+
     order_id: str = Field(..., alias="orderId", min_length=1, max_length=50)
     payment_id: UUID | None = Field(default=None, alias="paymentId")
     payer_id: UUID | None = Field(default=None, alias="payerId")
     amount: Decimal | None = None
 
     model_config = {"populate_by_name": True}
-
-
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
-
-class ErrorResponse(BaseModel):
-    detail: str
-

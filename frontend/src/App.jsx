@@ -31,6 +31,7 @@ function MainApp() {
 
   const { loadSampleReceipt } = useExpenses();
 
+  // Show auth view if not authenticated or no user
   if (!isAuthenticated || !currentUser) {
     return <AuthView />;
   }

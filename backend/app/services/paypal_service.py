@@ -1,4 +1,4 @@
-"""PayPal Sandbox API integration service using PayPal Orders API v2.
+﻿"""PayPal Sandbox API integration service using PayPal Orders API v2.
 
 Handles OAuth 2.0 client credentials authentication, order creation,
 and server-side payment capture using the official PayPal REST v2 endpoints.

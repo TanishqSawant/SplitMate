@@ -65,6 +65,7 @@ class ExtractionStatus(str, enum.Enum):
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
+    REVIEW_REQUIRED = "review_required"
     FAILED = "failed"
 
 
@@ -195,15 +196,29 @@ class Receipt(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_file_path: Mapped[str] = mapped_column(Text, nullable=False)
     merchant_name: Mapped[str | None] = mapped_column(String(255))
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    document_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # currency is nullable — never default to any currency; None means unknown
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     subtotal: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     tax: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     total: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     extraction_status: Mapped[ExtractionStatus] = mapped_column(
-        Enum(ExtractionStatus, name="extraction_status_enum"),
+        Enum(
+                ExtractionStatus,
+                name="extraction_status_enum",
+                 values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            ),
         default=ExtractionStatus.PENDING,
         nullable=False,
     )
+    # Extraction quality metadata persisted from Pawan's service
+    missing_fields: Mapped[str | None] = mapped_column(Text, nullable=True)       # JSON array
+    uncertain_fields: Mapped[str | None] = mapped_column(Text, nullable=True)     # JSON array
+    warnings: Mapped[str | None] = mapped_column(Text, nullable=True)             # JSON array
+    confidence: Mapped[float | None] = mapped_column(nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_user_reviewed: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -234,9 +249,10 @@ class ReceiptItem(Base):
         nullable=False,
     )
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    quantity: Mapped[int] = mapped_column(default=1, nullable=False)
-    unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    total_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    # Decimal quantity supports fractions (e.g. 0.5 kg) — mirrors Pawan's Decimal | None contract
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    total_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Relationships
     receipt: Mapped["Receipt"] = relationship(back_populates="items")
@@ -246,9 +262,9 @@ class ReceiptItem(Base):
 
     __table_args__ = (
         Index("ix_receipt_items_receipt_id", "receipt_id"),
-        CheckConstraint("quantity > 0", name="ck_receipt_items_quantity_positive"),
-        CheckConstraint("unit_price >= 0", name="ck_receipt_items_unit_price_non_negative"),
-        CheckConstraint("total_price >= 0", name="ck_receipt_items_total_price_non_negative"),
+        CheckConstraint("quantity IS NULL OR quantity > 0", name="ck_receipt_items_quantity_positive"),
+        CheckConstraint("unit_price IS NULL OR unit_price >= 0", name="ck_receipt_items_unit_price_non_negative"),
+        CheckConstraint("total_price IS NULL OR total_price >= 0", name="ck_receipt_items_total_price_non_negative"),
     )
 
 
@@ -352,7 +368,11 @@ class Payment(Base):
     paypal_order_id: Mapped[str | None] = mapped_column(String(50))
     paypal_capture_id: Mapped[str | None] = mapped_column(String(50))
     status: Mapped[PaymentStatus] = mapped_column(
-        Enum(PaymentStatus, name="payment_status_enum"),
+        Enum(
+                PaymentStatus,
+                name="payment_status_enum",
+                values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            ),
         default=PaymentStatus.PENDING,
         nullable=False,
     )

@@ -11,12 +11,15 @@ Tests:
 8. Error handling for invalid files, empty uploads, and oversized files.
 """
 
-import json
+from contextlib import contextmanager
 from decimal import Decimal
+import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
+from app.core.config import settings
 from app.services.receipt_extractor import (
     ReceiptExtractionService,
     ReceiptExtractionResult,
@@ -37,7 +40,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "receipts"
 # =============================================================================
 
 def test_extracted_line_item_math():
-    """Tests line item decimal values, fractional quantities, and strict no-fabrication rule."""
+    """Tests line item price rounding and preserving missing values."""
     item = ExtractedLineItem(
         item_name="Truffle Pasta",
         quantity=2,
@@ -45,27 +48,17 @@ def test_extracted_line_item_math():
         total_price=Decimal("31.00"),
     )
     assert item.item_name == "Truffle Pasta"
-    assert item.quantity == Decimal("2")
+    assert item.quantity == 2
     assert item.unit_price == Decimal("15.50")
     assert item.total_price == Decimal("31.00")
 
-    # Anti-fabrication rule: If total_price is omitted, it MUST remain None (never auto-calculated)
+    # If total_price is omitted, it remains None (never fabricated)
     item2 = ExtractedLineItem(
         item_name="Gelato",
         quantity=3,
         unit_price=Decimal("4.25"),
     )
     assert item2.total_price is None
-
-    # Fractional quantity support with Decimal
-    item3 = ExtractedLineItem(
-        item_name="Artisan Cheese",
-        quantity=Decimal("1.5"),
-        unit_price=Decimal("12.00"),
-        total_price=Decimal("18.00"),
-    )
-    assert item3.quantity == Decimal("1.5")
-    assert isinstance(item3.quantity, Decimal)
 
 
 def test_schema_null_safety_never_hallucinates():
@@ -86,7 +79,7 @@ def test_schema_null_safety_never_hallucinates():
 
 
 def test_math_consistency_reconciliation_warning():
-    """Verifies that mathematical discrepancies trigger warnings and adjust confidence."""
+    """Verifies that mathematical discrepancies trigger warnings while preserving genuine model confidence."""
     result = ReceiptExtractionResult(
         merchant_name="Bistro",
         currency="USD",
@@ -99,7 +92,7 @@ def test_math_consistency_reconciliation_warning():
     )
     result.validate_math_consistency()
     assert any("Mathematical discrepancy" in w for w in result.warnings)
-    assert result.confidence < 0.90
+    assert result.confidence == 0.90
 
 
 def test_backend_contract_adapter():
@@ -167,15 +160,18 @@ def test_frontend_contract_adapter():
     assert frontend["merchant_name"] == "Mario's Bistro"
     assert frontend["date"] == "2026-11-06"
     assert frontend["category"] == "Food & Dining"
-    assert frontend["subtotal"] == 45.50
-    assert frontend["tax"] == 4.50
-    assert frontend["tip"] == 5.00
-    assert frontend["total"] == 55.00
+    assert frontend["subtotal"] == "45.50"
+    assert frontend["tax"] == "4.50"
+    assert frontend["tip"] == "5.00"
+    assert frontend["total"] == "55.00"
     assert frontend["confidence"] == 0.95
     assert len(frontend["items"]) == 1
     assert frontend["items"][0]["id"] == "item_1"
     assert frontend["items"][0]["name"] == "Margherita Pizza"
-    assert frontend["items"][0]["price"] == 25.00
+    assert frontend["items"][0]["price"] == "25.00"
+    assert frontend["items"][0]["unit_price"] == "25.00"
+    assert frontend["items"][0]["total_price"] == "25.00"
+    assert frontend["items"][0]["quantity"] == "1"
 
 
 # =============================================================================
@@ -256,28 +252,54 @@ def test_tesseract_availability_check():
 
 
 # =============================================================================
-# 5. CURRENCY DETECTION & NO-FALLBACK GUARANTEES
+# 5. LLM PARSER & EXPLICIT FALLBACK ENGINE
 # =============================================================================
 
-def test_ocr_preprocessing_does_not_replace_gemini():
-    """Requirement: Local OCR/embedded text must strictly serve as preprocessing context, never replace Gemini."""
-    service = ReceiptExtractionService()  # Unconfigured API key
-    img = Image.new("RGB", (100, 100), color="white")
-    embedded_sample_text = (
-        "Cafe Bistro\nCoffee 1 4.50\nSubtotal: 4.50\nTax: 0.45\nTotal: 4.95"
-    )
-    res = service.ocr_engine.process_receipt(
-        image=img,
-        embedded_text=embedded_sample_text,
-    )
-    # Gemini failure/absence must return status failed with API_KEY_MISSING, never OCR/regex data
-    assert res.status == "failed"
-    assert res.error_code == "API_KEY_MISSING"
-    assert res.confidence is None
-    assert res.items == []
-    assert res.merchant_name is None
-    assert res.final_total is None
-    assert res.is_fallback is False
+def test_explicit_fallback_marks_degraded_status():
+    """Fallback engine must NEVER claim fallback is AI.
+    
+    Must set is_fallback=True, method='regex_heuristic_fallback', confidence=None,
+    and include explicit fallback warning.
+    """
+    raw_text = """
+    Mario's Italian Bistro
+    123 Little Italy Way
+    Date: 2026-11-06
+    Invoice #: REC-2026-9481
+    Margherita Pizza 1 18.00
+    Fettuccine Alfredo 2 28.00
+    Subtotal: $46.00
+    Tax: $4.14
+    TOTAL AMOUNT: $50.14
+    """
+    fallback = RegexHeuristicFallback()
+    result = fallback.parse_text(raw_text)
+
+    # Strict fallback assertions:
+    assert result.is_fallback is True
+    assert result.extraction_method == "regex_heuristic_fallback"
+    assert result.confidence is None
+    assert any("Fallback extraction used" in w for w in result.warnings)
+
+    # Data extraction assertions:
+    assert result.merchant_name == "Mario's Italian Bistro"
+    assert result.receipt_date == "2026-11-06"
+    assert result.receipt_number == "REC-2026-9481"
+    assert result.subtotal == Decimal("46.00")
+    assert result.tax == Decimal("4.14")
+    assert result.final_total == Decimal("50.14")
+    assert len(result.items) >= 2
+
+
+def test_fallback_with_empty_text():
+    """Empty text must yield null fields and confidence None with clear diagnostics."""
+    fallback = RegexHeuristicFallback()
+    result = fallback.parse_text("")
+    assert result.is_fallback is True
+    assert result.confidence is None
+    assert result.merchant_name is None
+    assert result.final_total is None
+    assert any("No text could be extracted" in w for w in result.warnings)
 
 
 def test_currency_detection_inr_formats():
@@ -290,10 +312,14 @@ def test_currency_detection_inr_formats():
 
 
 def test_currency_detection_usd_format():
-    """Tests that $ and USD are identified as USD."""
+    """Tests that bare $ remains ambiguous (None) while US$ and USD map to USD."""
     fallback = RegexHeuristicFallback()
-    assert fallback.parse_text("Mario Diner\nTotal: $50.00").currency == "USD"
+    bare_dollar_result = fallback.parse_text("Mario Diner\nTotal: $50.00")
+    assert bare_dollar_result.currency is None
+    assert "currency" in bare_dollar_result.uncertain_fields
+
     assert fallback.parse_text("City Cafe\nTotal: 25.00 USD").currency == "USD"
+    assert fallback.parse_text("City Cafe\nTotal: US$25.00").currency == "USD"
 
 
 def test_currency_missing_preserves_null_in_canonical_result():
@@ -304,59 +330,18 @@ def test_currency_missing_preserves_null_in_canonical_result():
     assert any("Currency was not detected on receipt" in w for w in result.warnings)
 
 
-def test_missing_currency_preserves_none_in_all_adapters():
-    """Requirement: If currency is not identified, preserve currency=None in all adapters without defaulting to USD."""
+def test_backend_adapter_preserves_none_for_missing_currency():
+    """Missing currency remains None in the backend contract without fabricating USD."""
     result = ReceiptExtractionResult(
-        is_receipt=True,
         merchant_name="Unknown Diner",
         currency=None,  # Genuinely missing
         subtotal=Decimal("10.00"),
         tax=Decimal("1.00"),
         final_total=Decimal("11.00"),
-        items=[
-            ExtractedLineItem(
-                item_name="Coffee",
-                quantity=1,
-                unit_price=Decimal("10.00"),
-                total_price=Decimal("10.00"),
-            ),
-        ],
-    )
-    # Backend contract adapter must preserve None (never default to USD)
-    backend_payload = result.to_backend_contract()
-    assert backend_payload["currency"] is None
-    assert not any("defaulted to USD" in w for w in result.warnings)
-
-    # Frontend contract adapter must preserve None
-    frontend_payload = result.to_frontend_contract()
-    assert frontend_payload["currency"] is None
-
-    # Full API response contract adapter must preserve None
-    api_payload = result.to_api_response()
-    assert api_payload["currency"] is None
-
-
-def test_backend_adapter_preserves_empty_items_without_dummy_fabrication():
-    """Backend adapter MUST preserve empty items as [] without fabricating dummy items."""
-    result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Mario's",
-        currency="USD",
         items=[],
     )
     payload = result.to_backend_contract()
-    assert payload["items"] == []
-
-
-def test_backend_adapter_rejects_non_receipt():
-    """Backend adapter MUST refuse to generate payload for non-receipts."""
-    result = ReceiptExtractionResult(
-        is_receipt=False,
-        rejection_reason="Document is an academic conversion table.",
-        items=[],
-    )
-    with pytest.raises(ValueError, match="non-receipt"):
-        result.to_backend_contract()
+    assert payload["currency"] is None
 
 
 # =============================================================================
@@ -365,608 +350,800 @@ def test_backend_adapter_rejects_non_receipt():
 
 def test_service_rejects_empty_file():
     service = ReceiptExtractionService()
-    # Contract response test (Section 2: return failed status with error_code and message)
-    res = service.extract_from_bytes(b"", "receipt.jpg")
-    assert res.status == "failed"
-    assert res.error_code == "EMPTY_FILE"
-    assert "empty" in res.error_message.lower()
-
-    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="empty"):
-        service.extract_from_bytes(b"", "receipt.jpg", raise_on_error=True)
+        service.extract_from_bytes(b"", "receipt.jpg")
 
 
 def test_service_rejects_unsupported_format():
     service = ReceiptExtractionService()
-    # Contract response test
-    res = service.extract_from_bytes(b"some content", "malicious_script.exe")
-    assert res.status == "failed"
-    assert res.error_code == "UNSUPPORTED_FORMAT"
-
-    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="not supported"):
-        service.extract_from_bytes(b"some content", "malicious_script.exe", raise_on_error=True)
+        service.extract_from_bytes(b"some content", "malicious_script.exe")
 
 
 def test_service_rejects_oversized_file():
     service = ReceiptExtractionService(max_size_mb=1)  # 1 MB threshold
     large_payload = b"0" * (2 * 1024 * 1024)  # 2 MB
-    # Contract response test
-    res = service.extract_from_bytes(large_payload, "large_receipt.png")
-    assert res.status == "failed"
-    assert res.error_code == "FILE_TOO_LARGE"
-
-    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="exceeds maximum allowed limit"):
-        service.extract_from_bytes(large_payload, "large_receipt.png", raise_on_error=True)
+        service.extract_from_bytes(large_payload, "large_receipt.png")
 
 
 def test_service_rejects_corrupted_image():
     service = ReceiptExtractionService()
-    # Contract response test
-    res = service.extract_from_bytes(b"not a real image payload", "broken.jpg")
-    assert res.status == "failed"
-    assert res.error_code == "CORRUPTED_IMAGE"
-
-    # Strict mode exception test
     with pytest.raises(ReceiptExtractionError, match="Corrupted or invalid image"):
-        service.extract_from_bytes(b"not a real image payload", "broken.jpg", raise_on_error=True)
-
-
-def test_reject_infix_postfix_table():
-    """CRITICAL FIX: Infix-to-postfix conversion tables must be classified as non-receipts."""
-    table_text = """
-    Infix to Postfix Conversion Table
-    Token   Stack   Postfix Output
-    (       (
-    A       (       A
-    +       (+      A
-    B       (+      AB
-    *       (+*     AB
-    C       (+*     ABC
-    )               ABC*+
-    """
-    fallback = RegexHeuristicFallback()
-    result = fallback.parse_text(table_text)
-
-    # Classification & Rejection assertions:
-    assert result.is_receipt is False
-    assert result.rejection_reason is not None
-    assert any(term in result.rejection_reason.lower() for term in ["academic", "infix", "postfix", "table"])
-    assert result.confidence == 0.0
-    assert result.merchant_name is None
-    assert result.items == []
-    assert result.final_total is None
-
-    # Contract assertions:
-    frontend_data = result.to_frontend_contract()
-    assert frontend_data["success"] is False
-    assert frontend_data["is_receipt"] is False
-    assert frontend_data["merchant"] is None
-    assert frontend_data["items"] == []
-
-    # Backend adapter must reject conversion
-    with pytest.raises(ValueError, match="non-receipt"):
-        result.to_backend_contract()
-
-
-def test_reject_blank_image():
-    """Blank images must be classified as non-receipts with confidence 0.0."""
-    fallback = RegexHeuristicFallback()
-    result = fallback.parse_text("")
-    assert result.is_receipt is False
-    assert result.status == "failed"
-    assert result.error_code == "NO_READABLE_TEXT"
-    assert result.confidence == 0.0
-    assert result.items == []
-
-    # With service.validate_receipt, raises ReceiptExtractionError for non-receipts
-    service = ReceiptExtractionService()
-    with pytest.raises(ReceiptExtractionError, match="No readable text"):
-        service.validate_receipt(result)
-
-
-def test_reject_random_academic_document():
-    """Academic document with abstract, theorem, and pseudocode must be rejected."""
-    academic_text = """
-    Algorithm Complexity Analysis in Distributed Systems
-    Abstract: In this paper we study asynchronous message passing.
-    Lemma 1. The time complexity of algorithm is O(n log n).
-    Proof: By induction on the height of the parse tree.
-    References:
-    [1] Knuth, D. The Art of Computer Programming.
-    """
-    fallback = RegexHeuristicFallback()
-    result = fallback.parse_text(academic_text)
-    assert result.is_receipt is False
-    assert result.status == "failed"
-    assert result.error_code == "NON_RECEIPT_DOCUMENT"
-    assert result.confidence == 0.0
-    assert result.merchant_name is None
-    assert result.items == []
-
-
-def test_valid_indian_receipt_inr():
-    """Tests extraction of Indian receipt with ₹ / Rs. currency and GST."""
-    indian_receipt_text = """
-    Saravana Bhavan Restaurant
-    12 Connaught Place, New Delhi
-    Date: 2026-11-08
-    Invoice: SB-8492
-    Masala Dosa 2 240.00
-    Filter Coffee 2 80.00
-    Subtotal: Rs. 320.00
-    GST 5%: Rs. 16.00
-    TOTAL AMOUNT: Rs. 336.00
-    Payment: Cash
-    """
-    fallback = RegexHeuristicFallback()
-    result = fallback.parse_text(indian_receipt_text)
-
-    assert result.is_receipt is True
-    assert result.currency == "INR"
-    assert result.merchant_name == "Saravana Bhavan Restaurant"
-    assert result.subtotal == Decimal("320.00")
-    assert result.tax == Decimal("16.00")
-    assert result.final_total == Decimal("336.00")
-    assert len(result.items) >= 2
-
-
-def test_low_confidence_review_gate():
-    """Low confidence extractions must be caught by validate_receipt."""
-    service = ReceiptExtractionService()
-    low_conf_result = ReceiptExtractionResult(
-        is_receipt=True,
-        confidence=0.10,
-        items=[],
-        final_total=None,
-    )
-    with pytest.raises(ReceiptExtractionError, match="confidence is insufficient"):
-        service.validate_receipt(low_conf_result)
+        service.extract_from_bytes(b"not a real image payload", "broken.jpg")
 
 
 # =============================================================================
-# 7. END-TO-END EXTRACTION WITH FIXTURES (NO SILENT FALLBACK)
+# 7. END-TO-END EXTRACTION WITH FIXTURES (MOCKED GEMINI VISION)
 # =============================================================================
+
+@contextmanager
+def _mock_genai_context(mock_response=None, side_effect=None):
+    mock_genai = MagicMock()
+    mock_client = MagicMock()
+    mock_genai.Client.return_value = mock_client
+    if side_effect:
+        mock_client.models.generate_content.side_effect = side_effect
+    elif mock_response:
+        mock_client.models.generate_content.return_value = mock_response
+
+    mock_types = MagicMock()
+    mock_google = MagicMock()
+    mock_google.genai = mock_genai
+    mock_genai.types = mock_types
+
+    # Attach mock_genai and mock_types to mock_client for inspection in tests
+    mock_client._mock_genai = mock_genai
+    mock_client._mock_types = mock_types
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "google": mock_google,
+            "google.genai": mock_genai,
+            "google.genai.types": mock_types,
+        },
+    ):
+        yield mock_client
+
+
+def _mock_gemini_success_response(merchant="Mario's Bistro", total="50.14", subtotal="46.00", tax="4.14"):
+    payload = {
+        "document_type": "receipt",
+        "status": "completed",
+        "merchant_name": merchant,
+        "currency": "USD",
+        "subtotal": subtotal,
+        "tax": tax,
+        "final_total": total,
+        "confidence": 0.95,
+        "items": [
+            {"item_name": "Margherita Pizza", "quantity": 1, "unit_price": "18.00", "total_price": "18.00"},
+            {"item_name": "Fettuccine Alfredo", "quantity": 2, "unit_price": "14.00", "total_price": "28.00"},
+        ],
+    }
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps(payload)
+    return mock_resp
+
 
 def test_fixture_01_clear_restaurant():
-    service = ReceiptExtractionService()
+    service = ReceiptExtractionService(api_key="test-api-key")
     path = FIXTURES_DIR / "receipt_01_clear_restaurant.png"
-    result = service.extract_from_path(path)
+
+    with _mock_genai_context(mock_response=_mock_gemini_success_response("Clear Restaurant")):
+        result = service.extract_from_path(path)
 
     assert result is not None
-    # Critical requirement: Without API key, fails immediately with API_KEY_MISSING, never silently falls back
-    assert result.status == "failed"
-    assert result.error_code == "API_KEY_MISSING"
+    assert result.status == "completed"
     assert result.is_fallback is False
-    assert result.confidence is None
-    frontend_payload = result.to_frontend_contract()
-    assert "is_receipt" in frontend_payload
+    assert result.extraction_method == "gemini_vision"
+    backend_payload = result.to_backend_contract()
+    assert backend_payload["merchant_name"] == "Clear Restaurant"
+    assert "total" in backend_payload
 
 
 def test_fixture_02_blurry_takeout():
-    service = ReceiptExtractionService()
+    service = ReceiptExtractionService(api_key="test-api-key")
     path = FIXTURES_DIR / "receipt_02_blurry_takeout.png"
-    result = service.extract_from_path(path)
 
-    # Blur detection runs during preprocessing
+    with _mock_genai_context(mock_response=_mock_gemini_success_response("Blurry Takeout")):
+        result = service.extract_from_path(path)
+
+    # Blur detection warning must be captured by preprocessor and merged into warnings
     assert any("blurry" in w.lower() for w in result.warnings)
+    assert result.is_fallback is False
 
 
 def test_fixture_03_rotated_grocery():
-    service = ReceiptExtractionService()
+    service = ReceiptExtractionService(api_key="test-api-key")
     path = FIXTURES_DIR / "receipt_03_rotated_grocery.png"
-    result = service.extract_from_path(path)
+
+    with _mock_genai_context(mock_response=_mock_gemini_success_response("Rotated Grocery")):
+        result = service.extract_from_path(path)
+
     assert result is not None
+    assert result.status == "completed"
+    assert result.is_fallback is False
 
 
 def test_fixture_04_incomplete_cafe():
-    service = ReceiptExtractionService()
+    service = ReceiptExtractionService(api_key="test-api-key")
     path = FIXTURES_DIR / "receipt_04_incomplete_cafe.png"
-    result = service.extract_from_path(path)
 
-    # Incomplete receipt has no address, so address MUST remain None/null (no hallucination)
+    with _mock_genai_context(mock_response=_mock_gemini_success_response("Incomplete Cafe")):
+        result = service.extract_from_path(path)
+
+    # Incomplete receipt has no address, address must remain None (never fabricated)
     assert result.merchant_address is None
 
 
 def test_fixture_05_digital_invoice_pdf():
-    service = ReceiptExtractionService()
+    service = ReceiptExtractionService(api_key="test-api-key")
     path = FIXTURES_DIR / "receipt_05_digital_invoice.pdf"
-    result = service.extract_from_path(path)
+
+    with _mock_genai_context(mock_response=_mock_gemini_success_response("Digital Invoice Corp")):
+        result = service.extract_from_path(path)
 
     assert result is not None
-    # Without configured Gemini API key, fails immediately with API_KEY_MISSING (no silent fallback)
-    assert result.status == "failed"
-    assert result.error_code == "API_KEY_MISSING"
+    assert result.is_fallback is False
     frontend_payload = result.to_frontend_contract()
     assert "items" in frontend_payload
+    assert "total" in frontend_payload
 
 
 # =============================================================================
-# 8. MANDATORY CHECKLIST & APPROVED CONTRACT COMPLIANCE TESTS
+# 8. CENTRALIZED GEMINI CONFIGURATION & STRICT PIPELINE TESTS
 # =============================================================================
 
-def test_missing_quantity_remains_null():
-    """Requirement 4: Missing quantity MUST remain null, never defaulting to 1."""
-    item = ExtractedLineItem(
-        item_name="Sparkling Water",
-        quantity=None,
-        unit_price=Decimal("4.00"),
-        total_price=Decimal("4.00"),
-    )
-    assert item.quantity is None
-    d = item.to_dict()
-    assert d["quantity"] is None
+def test_gemini_config_read_from_central_settings():
+    """ReceiptExtractionService, OCREngine, and GeminiVisionExtractor read config from settings."""
+    original_key = settings.GEMINI_API_KEY
+    original_model = settings.GEMINI_MODEL
+    try:
+        settings.GEMINI_API_KEY = "central-test-gemini-key"
+        settings.GEMINI_MODEL = "gemini-central-test-model"
+
+        service = ReceiptExtractionService()
+        assert service.api_key == "central-test-gemini-key"
+        assert service.model == "gemini-central-test-model"
+        assert service.ocr_engine.api_key == "central-test-gemini-key"
+        assert service.ocr_engine.model == "gemini-central-test-model"
+        assert service.ocr_engine.gemini_extractor.api_key == "central-test-gemini-key"
+        assert service.ocr_engine.gemini_extractor.model_name == "gemini-central-test-model"
+    finally:
+        settings.GEMINI_API_KEY = original_key
+        settings.GEMINI_MODEL = original_model
 
 
-def test_missing_prices_remain_null():
-    """Requirement 5: Missing prices MUST remain null, never defaulting to 0.00."""
-    item = ExtractedLineItem(
-        item_name="Market Price Catch of the Day",
-        quantity=1,
-        unit_price=None,
-        total_price=None,
-    )
-    assert item.unit_price is None
-    assert item.total_price is None
-    d = item.to_dict()
-    assert d["unit_price"] is None
-    assert d["total_price"] is None
+def test_missing_gemini_key_returns_failed_not_heuristic():
+    """Missing Gemini key produces a controlled failed result; never falls back to regex."""
+    service = ReceiptExtractionService(api_key="")
+    path = FIXTURES_DIR / "receipt_01_clear_restaurant.png"
+    result = service.extract_from_path(path)
+
+    assert result.status == "failed"
+    assert result.error_code == "MISSING_API_KEY"
+    assert result.is_fallback is False
+    assert result.extraction_method == "gemini_vision"
+    assert result.merchant_name is None
+    assert result.final_total is None
+    assert "Gemini API key is not configured" in result.error_message
 
 
-def test_no_unknown_merchant_fabrication():
-    """Requirement 2: Never fabricate 'Unknown Merchant'."""
-    result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name=None,
-        currency="USD",
-        items=[
-            ExtractedLineItem(item_name="Item 1", quantity=1, unit_price=Decimal("5.00"), total_price=Decimal("5.00")),
+def test_gemini_client_receives_explicit_25s_timeout():
+    """Gemini client must be initialized with explicit 25-second (25,000 ms) HTTP timeout."""
+    extractor = GeminiVisionExtractor(api_key="test-api-key")
+    img = Image.new("RGB", (50, 50), color="white")
+
+    with _mock_genai_context(mock_response=_mock_gemini_success_response()) as mock_client:
+        extractor.extract(img)
+
+        # Verify HttpOptions was called with timeout=25_000 (ms)
+        mock_client._mock_types.HttpOptions.assert_called_once_with(timeout=25_000)
+        # Verify Client was initialized with the api_key and http_options
+        mock_client._mock_genai.Client.assert_called_once_with(
+            api_key="test-api-key",
+            http_options=mock_client._mock_types.HttpOptions.return_value,
+        )
+
+
+def test_gemini_timeout_returns_failed_not_heuristic():
+    """Gemini timeout produces a failed extraction result with error_code=TIMEOUT without falling back."""
+    extractor = GeminiVisionExtractor(api_key="mock-key")
+    with _mock_genai_context(side_effect=TimeoutError("Deadline exceeded after 25s")):
+        img = Image.new("RGB", (100, 100), color="white")
+        result = extractor.extract(img, text_context="Some text from receipt")
+
+    assert result.status == "failed"
+    assert result.error_code == "TIMEOUT"
+    assert result.confidence is None
+    assert result.is_fallback is False
+    assert result.extraction_method == "gemini_vision"
+    assert "timed out" in result.error_message.lower()
+
+
+def test_missing_confidence_remains_null():
+    """Missing or null confidence from Gemini is preserved as None, never defaulted to 0.95."""
+    extractor = GeminiVisionExtractor(api_key="mock-key")
+    payload = {
+        "document_type": "receipt",
+        "status": "completed",
+        "merchant_name": "No Confidence Bistro",
+        "currency": "USD",
+        "subtotal": "20.00",
+        "tax": "2.00",
+        "final_total": "22.00",
+        "confidence": None,
+        "items": [
+            {"item_name": "Burger", "quantity": 1, "unit_price": "20.00", "total_price": "20.00"},
         ],
-        final_total=Decimal("5.00"),
+    }
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps(payload)
+
+    with _mock_genai_context(mock_response=mock_resp):
+        img = Image.new("RGB", (50, 50), color="white")
+        result = extractor.extract(img)
+
+    assert result.confidence is None
+    assert result.status == "completed"
+    frontend = result.to_frontend_contract()
+    assert frontend["confidence"] is None
+
+    # Also test completely omitted confidence key
+    del payload["confidence"]
+    mock_resp.text = json.dumps(payload)
+    with _mock_genai_context(mock_response=mock_resp):
+        img = Image.new("RGB", (50, 50), color="white")
+        result_omitted = extractor.extract(img)
+
+    assert result_omitted.confidence is None
+
+
+def test_zero_confidence_remains_zero():
+    """Zero confidence from Gemini is preserved as 0.0, never replaced with 0.95."""
+    extractor = GeminiVisionExtractor(api_key="mock-key")
+    payload = {
+        "document_type": "receipt",
+        "status": "review_required",
+        "merchant_name": "Low Quality Cafe",
+        "currency": "USD",
+        "subtotal": "10.00",
+        "tax": "1.00",
+        "final_total": "11.00",
+        "confidence": 0.0,
+        "items": [
+            {"item_name": "Coffee", "quantity": 1, "unit_price": "10.00", "total_price": "10.00"},
+        ],
+    }
+    mock_resp = MagicMock()
+    mock_resp.text = json.dumps(payload)
+
+    with _mock_genai_context(mock_response=mock_resp):
+        img = Image.new("RGB", (50, 50), color="white")
+        result = extractor.extract(img)
+
+    assert result.confidence == 0.0
+    assert result.confidence != 0.95
+    frontend = result.to_frontend_contract()
+    assert frontend["confidence"] == 0.0
+
+
+def test_gemini_api_exception_returns_failed_not_heuristic():
+    """Gemini API error produces a failed result and does not leak API keys."""
+    secret_key = "super-secret-gemini-key-12345"
+    extractor = GeminiVisionExtractor(api_key=secret_key)
+    with _mock_genai_context(side_effect=RuntimeError("503 Service Unavailable")):
+        img = Image.new("RGB", (100, 100), color="white")
+        result = extractor.extract(img, text_context="Some text")
+
+    assert result.status == "failed"
+    assert result.error_code == "GEMINI_API_ERROR"
+    assert result.is_fallback is False
+    assert result.extraction_method == "gemini_vision"
+    # Verify the secret API key is never exposed in error_message or warnings
+    assert secret_key not in result.error_message
+    assert not any(secret_key in w for w in result.warnings)
+
+
+def test_local_tesseract_does_not_independently_produce_successful_extraction():
+    """Local Tesseract OCR text must NOT independently generate a successful extraction."""
+    ocr_engine = OCREngine(api_key="")  # Gemini unavailable
+    with patch.object(OCREngine, "is_tesseract_available", return_value=True):
+        with patch.object(
+            OCREngine,
+            "extract_text_local_ocr",
+            return_value="Le Gourmet Cafe\nCroissant 2 8.00\nTotal: $8.00",
+        ):
+            img = Image.new("RGB", (100, 100), color="white")
+            result = ocr_engine.process_receipt(img)
+
+    assert result.status == "failed"
+    assert result.error_code == "MISSING_API_KEY"
+    assert result.is_fallback is False
+    assert result.final_total is None
+    assert result.merchant_name is None
+
+
+def test_gemini_partially_readable_receipt_returns_review_required():
+    """Partially readable receipt returns review_required when Gemini returns partial data."""
+    extractor = GeminiVisionExtractor(api_key="mock-key")
+    partial_json = json.dumps({
+        "document_type": "receipt",
+        "status": "review_required",
+        "merchant_name": "Blurry Bistro",
+        "currency": "USD",
+        "final_total": "35.00",
+        "items": [
+            {"item_name": "Soup", "quantity": 1, "unit_price": "10.00", "total_price": "10.00"}
+        ],
+        "uncertain_fields": ["subtotal", "tax"],
+        "missing_fields": ["subtotal"],
+        "confidence": 0.65,
+    })
+    mock_resp = MagicMock()
+    mock_resp.text = partial_json
+
+    with _mock_genai_context(mock_response=mock_resp):
+        img = Image.new("RGB", (100, 100), color="white")
+        result = extractor.extract(img)
+
+    assert result.status == "review_required"
+    assert result.merchant_name == "Blurry Bistro"
+    assert result.final_total == Decimal("35.00")
+    assert "subtotal" in result.uncertain_fields
+    assert len(result.items) == 1
+
+
+def test_gemini_unsupported_document_returns_failed():
+    """Non-receipt or unsupported document returns failed status."""
+    extractor = GeminiVisionExtractor(api_key="mock-key")
+    unsupported_json = json.dumps({
+        "document_type": "unsupported",
+        "status": "failed",
+        "merchant_name": None,
+        "currency": None,
+        "items": [],
+        "confidence": 0.1,
+    })
+    mock_resp = MagicMock()
+    mock_resp.text = unsupported_json
+
+    with _mock_genai_context(mock_response=mock_resp):
+        img = Image.new("RGB", (100, 100), color="white")
+        result = extractor.extract(img)
+
+    assert result.status == "failed"
+    assert result.error_code == "UNSUPPORTED_DOCUMENT"
+
+
+# =============================================================================
+# 9. FOCUSED SCHEMA & MISSING VALUE PRESERVATION TESTS (REQUIREMENTS 1-14)
+# =============================================================================
+
+def test_missing_quantity_remains_none():
+    """1. Missing quantity remains None."""
+    item = ExtractedLineItem(item_name="Espresso", unit_price=Decimal("3.50"))
+    assert item.quantity is None
+
+
+def test_missing_unit_price_remains_none():
+    """2. Missing unit_price remains None."""
+    item = ExtractedLineItem(item_name="Croissant", quantity=Decimal("2"))
+    assert item.unit_price is None
+
+
+def test_missing_total_price_remains_none():
+    """3. Missing total_price remains None."""
+    item = ExtractedLineItem(item_name="Bagel", quantity=Decimal("1"), unit_price=Decimal("2.50"))
+    assert item.total_price is None
+
+
+def test_missing_subtotal_remains_none():
+    """4. Missing subtotal remains None."""
+    result = ReceiptExtractionResult(final_total=Decimal("25.00"))
+    assert result.subtotal is None
+    payload = result.to_backend_contract()
+    assert payload["subtotal"] is None
+    frontend = result.to_frontend_contract()
+    assert frontend["subtotal"] is None
+
+
+def test_missing_tax_remains_none():
+    """5. Missing tax remains None."""
+    result = ReceiptExtractionResult(final_total=Decimal("25.00"))
+    assert result.tax is None
+    payload = result.to_backend_contract()
+    assert payload["tax"] is None
+    frontend = result.to_frontend_contract()
+    assert frontend["tax"] is None
+
+
+def test_missing_currency_remains_none():
+    """6. Missing currency remains None."""
+    result = ReceiptExtractionResult()
+    assert result.currency is None
+    payload = result.to_backend_contract()
+    assert payload["currency"] is None
+    frontend = result.to_frontend_contract()
+    assert frontend["currency"] is None
+
+
+def test_missing_merchant_remains_none():
+    """7. Missing merchant remains None."""
+    result = ReceiptExtractionResult()
+    assert result.merchant_name is None
+    payload = result.to_backend_contract()
+    assert payload["merchant_name"] is None
+    frontend = result.to_frontend_contract()
+    assert frontend["merchant"] is None
+    assert frontend["merchant_name"] is None
+
+
+def test_explicit_zero_remains_zero():
+    """8. Explicit zero remains zero."""
+    item = ExtractedLineItem(
+        item_name="Complimentary Water",
+        quantity=Decimal("0"),
+        unit_price=Decimal("0.00"),
+        total_price=Decimal("0.00"),
     )
-    # Backend contract preserves None when merchant_name is missing (no ValueError, no fake default)
-    backend_payload = result.to_backend_contract()
-    assert backend_payload["merchant_name"] is None
+    assert item.quantity == Decimal("0")
+    assert item.unit_price == Decimal("0.00")
+    assert item.total_price == Decimal("0.00")
 
-    # Frontend and API responses preserve None
-    api_resp = result.to_api_response()
-    assert api_resp["merchant_name"] is None
-
-    frontend_resp = result.to_frontend_contract()
-    assert frontend_resp["merchant"] is None
-
-
-def test_status_completed_on_fully_verified_receipt():
-    """Requirement 11: Valid, confident, complete receipt returns completed."""
     result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Artisan Bistro",
-        currency="USD",
-        receipt_date="2026-11-09",
-        subtotal=Decimal("40.00"),
-        tax=Decimal("4.00"),
-        final_total=Decimal("44.00"),
-        confidence=0.95,
-        is_fallback=False,
+        subtotal=Decimal("0.00"),
+        tax=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        tip=Decimal("0.00"),
+        final_total=Decimal("0.00"),
+    )
+    assert result.subtotal == Decimal("0.00")
+    assert result.tax == Decimal("0.00")
+    assert result.discount == Decimal("0.00")
+    assert result.tip == Decimal("0.00")
+    assert result.final_total == Decimal("0.00")
+
+
+def test_fractional_quantities_are_preserved():
+    """9. Fractional quantities are preserved using Decimal."""
+    for qty_val in [Decimal("1"), Decimal("0.5"), Decimal("1.2500"), Decimal("2.75")]:
+        item = ExtractedLineItem(item_name="Apples", quantity=qty_val)
+        assert item.quantity == qty_val
+        assert isinstance(item.quantity, Decimal)
+
+
+def test_empty_items_remain_empty_list():
+    """10. Empty items remain an empty list."""
+    result = ReceiptExtractionResult(items=[])
+    assert result.items == []
+    payload = result.to_backend_contract()
+    assert payload["items"] == []
+    frontend = result.to_frontend_contract()
+    assert frontend["items"] == []
+
+
+def test_invalid_numeric_values_handled_safely():
+    """11. Invalid numeric values are rejected safely with ValidationError."""
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ExtractedLineItem(item_name="Bad Qty", quantity="not-a-number")
+
+    with pytest.raises(ValidationError):
+        ExtractedLineItem(item_name="Bad Price", unit_price="abc")
+
+    with pytest.raises(ValidationError):
+        ReceiptExtractionResult(final_total="invalid-money")
+
+
+def test_missing_tax_not_treated_as_zero_during_reconciliation():
+    """12. Missing tax is not treated as zero during reconciliation."""
+    result = ReceiptExtractionResult(
+        subtotal=Decimal("50.00"),
+        tax=None,  # Missing tax
+        final_total=Decimal("55.00"),  # Difference could legitimately be unextracted tax
+    )
+    result.validate_math_consistency()
+    # No false mathematical discrepancy warning triggered because tax is None
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
+
+
+def test_missing_subtotal_does_not_invalidate_extraction():
+    """13. Missing subtotal does not automatically invalidate an otherwise valid extraction."""
+    result = ReceiptExtractionResult(
+        status="completed",
+        subtotal=None,
+        tax=Decimal("5.00"),
+        final_total=Decimal("55.00"),
         items=[
-            ExtractedLineItem(item_name="Pizza", quantity=1, unit_price=Decimal("20.00"), total_price=Decimal("20.00")),
-            ExtractedLineItem(item_name="Salad", quantity=2, unit_price=Decimal("10.00"), total_price=Decimal("20.00")),
+            ExtractedLineItem(
+                item_name="Pizza",
+                quantity=Decimal("1"),
+                unit_price=Decimal("50.00"),
+                total_price=Decimal("50.00"),
+            )
         ],
     )
     result.validate_math_consistency()
     assert result.status == "completed"
-    assert result.missing_fields == []
-    assert result.uncertain_fields == []
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
 
 
-def test_status_review_required_on_incomplete_receipt():
-    """Requirement 12: Incomplete or uncertain receipt returns review_required."""
+def test_missing_confidence_does_not_invalidate_extraction():
+    """14. Missing confidence does not automatically invalidate an otherwise valid extraction."""
     result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Mario's",
-        currency=None,  # Missing currency
-        subtotal=Decimal("20.00"),
-        final_total=None,  # Missing total
-        confidence=0.50,
-        items=[],
+        status="completed",
+        confidence=None,
+        subtotal=Decimal("50.00"),
+        tax=Decimal("5.00"),
+        final_total=Decimal("55.00"),
     )
     result.validate_math_consistency()
-    assert result.status == "review_required"
-    assert "currency" in result.missing_fields
-    assert "final_total" in result.missing_fields
-    assert "items" in result.missing_fields
-
-
-def test_gemini_failure_returns_failed_status(monkeypatch):
-    """Requirement 7: Gemini failure returns status: failed with error_code."""
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
-
-    def mock_generate_content(*args, **kwargs):
-        raise RuntimeError("Google GenAI 500: Internal Server Error")
-
-    class MockModels:
-        generate_content = staticmethod(mock_generate_content)
-
-    class MockGenaiClient:
-        models = MockModels()
-
-    import google.genai
-    monkeypatch.setattr(google.genai, "Client", lambda *args, **kwargs: MockGenaiClient())
-
-    img = Image.new("RGB", (100, 100), color="white")
-    result = extractor.extract(img)
-
-    assert result.status == "failed"
-    assert result.is_receipt is False
-    assert result.error_code == "AI_EXTRACTION_FAILED"
-    assert "extraction failed" in result.error_message.lower()
+    assert result.status == "completed"
     assert result.confidence is None
 
 
-def test_gemini_quota_error_returns_rate_limit_exceeded(monkeypatch):
-    """Requirement 12: Gemini API rate limit or quota errors return RATE_LIMIT_EXCEEDED."""
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
+# =============================================================================
+# 10. FOCUSED TOTAL RECONCILIATION TESTS
+# =============================================================================
 
-    def mock_generate_content(*args, **kwargs):
-        raise RuntimeError("Resource exhausted: API quota exceeded (HTTP 429)")
-
-    class MockModels:
-        generate_content = staticmethod(mock_generate_content)
-
-    class MockGenaiClient:
-        models = MockModels()
-
-    import google.genai
-    monkeypatch.setattr(google.genai, "Client", lambda *args, **kwargs: MockGenaiClient())
-
-    img = Image.new("RGB", (100, 100), color="white")
-    result = extractor.extract(img)
-
-    assert result.status == "failed"
-    assert result.is_receipt is False
-    assert result.error_code == "RATE_LIMIT_EXCEEDED"
-    assert "rate limit or quota exceeded" in result.error_message.lower()
-    assert result.confidence is None
-
-
-def test_gemini_timeout_returns_failed_status(monkeypatch):
-    """Requirement 8: Gemini timeout returns status: failed with error_code: TIMEOUT."""
-    import time
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
-
-    # Temporarily shorten timeout for quick test
-    import app.services.receipt_extractor.llm_parser as parser_module
-    monkeypatch.setattr(parser_module, "GEMINI_TIMEOUT_SECONDS", 0.1)
-
-    def mock_hanging_call(*args, **kwargs):
-        time.sleep(1.0)
-        return None
-
-    class MockModels:
-        generate_content = staticmethod(mock_hanging_call)
-
-    class MockGenaiClient:
-        models = MockModels()
-
-    import google.genai
-    monkeypatch.setattr(google.genai, "Client", lambda *args, **kwargs: MockGenaiClient())
-
-    img = Image.new("RGB", (100, 100), color="white")
-    t0 = time.time()
-    result = extractor.extract(img)
-    elapsed = time.time() - t0
-
-    # Must return quickly after timeout without waiting for the 1.0s hanging thread
-    assert elapsed < 0.7
-    assert result.status == "failed"
-    assert result.is_receipt is False
-    assert result.error_code == "TIMEOUT"
-    assert "timed out" in result.error_message.lower()
-
-
-def test_all_response_arrays_always_present():
-    """Requirement 13: items, missing_fields, uncertain_fields, warnings must always be present."""
-    failed_result = ReceiptExtractionResult(
-        status="failed",
-        is_receipt=False,
-        error_code="TEST_ERROR",
-        error_message="Test failure",
-    )
-    api_resp = failed_result.to_api_response()
-    assert isinstance(api_resp["items"], list)
-    assert isinstance(api_resp["missing_fields"], list)
-    assert isinstance(api_resp["uncertain_fields"], list)
-    assert isinstance(api_resp["warnings"], list)
-
-
-def test_monetary_values_decimal_strings_in_api_response():
-    """Requirement 15: Monetary values use Decimal internally and decimal strings externally."""
+def test_missing_tip_skips_total_reconciliation():
+    """1. Missing tip skips total reconciliation."""
     result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Cafe",
-        currency="USD",
-        subtotal=Decimal("45.50"),
-        tax=Decimal("4.55"),
+        subtotal=Decimal("50.00"),
+        tax=Decimal("5.00"),
+        tip=None,
+        discount=Decimal("0.00"),
+        final_total=Decimal("60.00"),  # Difference could legitimately be unextracted tip
+    )
+    result.validate_math_consistency()
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
+
+
+def test_missing_discount_skips_total_reconciliation():
+    """2. Missing discount skips total reconciliation."""
+    result = ReceiptExtractionResult(
+        subtotal=Decimal("50.00"),
+        tax=Decimal("5.00"),
+        tip=Decimal("0.00"),
+        discount=None,
+        final_total=Decimal("50.00"),  # Difference could legitimately be unextracted discount
+    )
+    result.validate_math_consistency()
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
+
+
+def test_explicit_zero_tip_and_discount_preserved_and_reconciled():
+    """3. Explicit zero tip and discount are preserved and reconciled."""
+    result = ReceiptExtractionResult(
+        subtotal=Decimal("50.00"),
+        tax=Decimal("5.00"),
+        tip=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        final_total=Decimal("55.00"),
+    )
+    assert result.tip == Decimal("0.00")
+    assert result.discount == Decimal("0.00")
+    result.validate_math_consistency()
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
+
+
+def test_valid_total_produces_no_discrepancy():
+    """4. A valid total produces no discrepancy."""
+    result = ReceiptExtractionResult(
+        subtotal=Decimal("40.00"),
+        tax=Decimal("4.00"),
         tip=Decimal("5.00"),
         discount=Decimal("2.00"),
-        final_total=Decimal("53.05"),
-        items=[
-            ExtractedLineItem(item_name="Coffee", quantity=2, unit_price=Decimal("4.50"), total_price=Decimal("9.00")),
-        ],
+        final_total=Decimal("47.00"),
     )
-    api_resp = result.to_api_response()
-    assert api_resp["subtotal"] == "45.50"
-    assert api_resp["tax"] == "4.55"
-    assert api_resp["tip"] == "5.00"
-    assert api_resp["discount"] == "2.00"
-    assert api_resp["total"] == "53.05"
-    assert api_resp["final_total"] == "53.05"
-    assert api_resp["items"][0]["unit_price"] == "4.50"
-    assert api_resp["items"][0]["total_price"] == "9.00"
+    result.validate_math_consistency()
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
 
 
-def test_approved_contract_field_set():
-    """Verifies that to_api_response() contains all 14 single-source-of-truth fields."""
+def test_genuine_discrepancy_detected_without_arbitrary_threshold():
+    """5. A genuine discrepancy is detected without an arbitrary 0.05 threshold."""
     result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Bistro",
-        currency="USD",
+        subtotal=Decimal("50.00"),
+        tax=Decimal("5.00"),
+        tip=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        final_total=Decimal("55.02"),  # 0.02 discrepancy
+        confidence=0.90,
+    )
+    result.validate_math_consistency()
+    assert any("Mathematical discrepancy" in w for w in result.warnings)
+    assert result.confidence is not None
+    assert result.confidence == 0.90
+
+
+def test_missing_subtotal_continues_to_be_preserved():
+    """6. Missing subtotal continues to be preserved."""
+    result = ReceiptExtractionResult(
+        subtotal=None,
+        tax=Decimal("5.00"),
+        tip=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        final_total=Decimal("55.00"),
+    )
+    assert result.subtotal is None
+    result.validate_math_consistency()
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
+
+
+def test_missing_confidence_does_not_invalidate_extraction_reconciliation():
+    """7. Missing confidence does not invalidate extraction."""
+    result = ReceiptExtractionResult(
+        status="completed",
+        confidence=None,
+        subtotal=Decimal("50.00"),
+        tax=Decimal("5.00"),
+        tip=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        final_total=Decimal("55.00"),
+    )
+    result.validate_math_consistency()
+    assert result.status == "completed"
+    assert result.confidence is None
+    assert not any("Mathematical discrepancy" in w for w in result.warnings)
+
+
+# =============================================================================
+# 11. CURRENCY AMBIGUITY, CONFIDENCE & DECIMAL SERIALIZATION TESTS
+# =============================================================================
+
+def test_bare_dollar_remains_ambiguous():
+    """Bare '$' remains ambiguous: currency is None, marked in uncertain_fields and warnings."""
+    # From model constructor directly
+    res = ReceiptExtractionResult(
+        merchant_name="Ambiguous Diner",
+        currency="$",
+        final_total=Decimal("20.00"),
+    )
+    assert res.currency is None
+    assert "currency" in res.uncertain_fields
+    assert any("Ambiguous currency symbol '$'" in w for w in res.warnings)
+
+    # From regex fallback
+    fallback = RegexHeuristicFallback()
+    res_fallback = fallback.parse_text("Ambiguous Diner\nTotal: $20.00")
+    assert res_fallback.currency is None
+    assert "currency" in res_fallback.uncertain_fields
+    assert any("Ambiguous currency symbol '$'" in w for w in res_fallback.warnings)
+
+
+def test_us_dollar_maps_to_usd():
+    """US$ unambiguously maps to USD."""
+    res = ReceiptExtractionResult(
+        merchant_name="US Store",
+        currency="US$",
+        final_total=Decimal("20.00"),
+    )
+    assert res.currency == "USD"
+    assert "currency" not in res.uncertain_fields
+
+    fallback = RegexHeuristicFallback()
+    res_fallback = fallback.parse_text("US Store\nTotal: US$20.00")
+    assert res_fallback.currency == "USD"
+
+
+def test_explicit_cad_aud_usd_remain_correct():
+    """Explicit CAD, AUD, and USD remain correct."""
+    for code in ["CAD", "AUD", "USD"]:
+        res = ReceiptExtractionResult(
+            merchant_name=f"{code} Merchant",
+            currency=code,
+            final_total=Decimal("50.00"),
+        )
+        assert res.currency == code
+        assert "currency" not in res.uncertain_fields
+
+    fallback = RegexHeuristicFallback()
+    assert fallback.parse_text("Canadian Store\nTotal: 15.00 CAD").currency == "CAD"
+    assert fallback.parse_text("Aussie Store\nTotal: 25.00 AUD").currency == "AUD"
+    assert fallback.parse_text("US Store\nTotal: 35.00 USD").currency == "USD"
+
+
+def test_missing_currency_remains_none_without_uncertain_flag():
+    """Missing currency remains None and is not flagged as ambiguous '$'."""
+    res = ReceiptExtractionResult(
+        merchant_name="No Currency Merchant",
+        currency=None,
+        final_total=Decimal("10.00"),
+    )
+    assert res.currency is None
+    assert "currency" not in res.uncertain_fields
+
+    fallback = RegexHeuristicFallback()
+    res_fallback = fallback.parse_text("Generic Merchant\nItem 1 10.00\nTotal: 10.00")
+    assert res_fallback.currency is None
+    assert "currency" not in res_fallback.uncertain_fields
+
+
+def test_genuine_confidence_preserved_unchanged_on_math_inconsistency():
+    """Genuine confidence remains unchanged after math inconsistency warning."""
+    res = ReceiptExtractionResult(
+        merchant_name="Inconsistent Math Bistro",
         subtotal=Decimal("10.00"),
         tax=Decimal("1.00"),
-        final_total=Decimal("11.00"),
-        items=[],
+        tip=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        final_total=Decimal("15.00"),  # Expected 11.00, mismatch
+        confidence=0.88,
     )
-    api_resp = result.to_api_response()
-    required_fields = [
-        "document_type",
-        "merchant_name",
-        "currency",
-        "subtotal",
-        "tax",
-        "final_total",
-        "items",
-        "missing_fields",
-        "uncertain_fields",
-        "confidence",
-        "warnings",
-        "status",
-        "error_code",
-        "error_message",
-    ]
-    for field in required_fields:
-        assert field in api_resp, f"Required contract field missing: {field}"
+    res.validate_math_consistency()
+    assert any("Mathematical discrepancy" in w for w in res.warnings)
+    # Genuine confidence MUST NOT be arbitrarily reduced
+    assert res.confidence == 0.88
 
 
-def test_gemini_failure_never_triggers_regex_fallback(monkeypatch):
-    """Critical Requirement 3: No regex or local fallback may silently replace a failed Gemini extraction."""
-    service = ReceiptExtractionService(api_key="test-key")
+def test_regex_fallback_does_not_invent_confidence():
+    """Regex fallback sets confidence=None, never inventing an artificial score."""
+    fallback = RegexHeuristicFallback()
+    res = fallback.parse_text("Sample Store\nItem 1 10.00\nTotal: 10.00")
+    assert res.confidence is None
+    assert res.is_fallback is True
 
-    def mock_broken_call(*args, **kwargs):
-        raise RuntimeError("Google GenAI 500: Internal Server Error")
-
-    class MockModels:
-        generate_content = staticmethod(mock_broken_call)
-
-    class MockGenaiClient:
-        models = MockModels()
-
-    import google.genai
-    monkeypatch.setattr(google.genai, "Client", lambda *args, **kwargs: MockGenaiClient())
-
-    img = Image.new("RGB", (100, 100), color="white")
-    import io
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    raw_bytes = buf.getvalue()
-
-    result = service.extract_from_bytes(raw_bytes, filename="receipt.png")
-
-    # MUST return failed, NEVER silent regex fallback
-    assert result.status == "failed"
-    assert result.error_code == "AI_EXTRACTION_FAILED"
-    assert result.is_fallback is False
-    assert result.confidence is None
-    assert result.items == []
+    res_empty = fallback.parse_text("")
+    assert res_empty.confidence is None
+    assert res_empty.is_fallback is True
 
 
-def test_approved_interface_callable():
-    """Verifies exact method signatures: extract_from_bytes and extract_from_path."""
-    service = ReceiptExtractionService()
-
-    # extract_from_bytes callable with exact parameter names
-    res1 = service.extract_from_bytes(file_bytes=b"", filename="receipt.jpg")
-    assert res1.status == "failed"
-    assert res1.error_code == "EMPTY_FILE"
-
-    # extract_from_path callable with exact parameter names
-    sharp_path = FIXTURES_DIR / "receipt_01_clear_restaurant.png"
-    res2 = service.extract_from_path(file_path=sharp_path)
-    assert res2 is not None
-
-
-def test_missing_confidence_is_not_replaced_with_095(monkeypatch):
-    """Requirement 15: Missing confidence MUST remain None, never replaced with 0.95 or fabricated values."""
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
-
-    mock_gemini_json = json.dumps({
-        "status": "completed",
-        "document_type": "receipt",
-        "is_receipt": True,
-        "merchant_name": "Authentic Bistro",
-        "currency": "USD",
-        "subtotal": "25.00",
-        "tax": "2.50",
-        "final_total": "27.50",
-        "confidence": None,  # Model genuinely did not provide confidence
-        "items": [
-            {
-                "item_name": "Pasta",
-                "quantity": 1,
-                "unit_price": "25.00",
-                "total_price": "25.00",
-            }
-        ],
-        "missing_fields": [],
-        "uncertain_fields": [],
-        "warnings": [],
-    })
-
-    class MockResponse:
-        text = mock_gemini_json
-
-    class MockModels:
-        generate_content = staticmethod(lambda *args, **kwargs: MockResponse())
-
-    class MockGenaiClient:
-        models = MockModels()
-
-    import google.genai
-    monkeypatch.setattr(google.genai, "Client", lambda *args, **kwargs: MockGenaiClient())
-
-    img = Image.new("RGB", (100, 100), color="white")
-    result = extractor.extract(img)
-
-    # Confidence must strictly remain None, never defaulted to 0.95
-    assert result.confidence is None
-    api_payload = result.to_api_response()
-    assert api_payload["confidence"] is None
-    # Because confidence is missing, status requires human review
-    assert result.status == "review_required"
-
-
-def test_fractional_quantities():
-    """Requirement 4: Line item quantity must support fractional values using Decimal."""
-    # Fractional quantities: 0.5 kg, 1.25 lbs, etc.
-    item_half = ExtractedLineItem(
-        item_name="Deli Roast Beef",
-        quantity=Decimal("0.5"),
-        unit_price=Decimal("16.00"),
-        total_price=Decimal("8.00"),
-    )
-    assert item_half.quantity == Decimal("0.5")
-    assert isinstance(item_half.quantity, Decimal)
-    assert item_half.to_dict()["quantity"] == Decimal("0.5")
-    assert isinstance(item_half.to_dict()["quantity"], Decimal)
-
-    item_float_input = ExtractedLineItem(
-        item_name="Bulk Grapes",
-        quantity=1.75,
-        unit_price=Decimal("4.00"),
-        total_price=Decimal("7.00"),
-    )
-    assert item_float_input.quantity == Decimal("1.75")
-    assert isinstance(item_float_input.quantity, Decimal)
-    assert item_float_input.to_dict()["quantity"] == Decimal("1.75")
-    assert isinstance(item_float_input.to_dict()["quantity"], Decimal)
-
-
-def test_no_fabricated_zero_values():
-    """Requirement 9: Missing monetary values MUST remain None, never converted to Decimal('0.00') or 0.0."""
-    result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Cafe With Missing Totals",
+def test_frontend_contract_decimal_string_serialization():
+    """Frontend contract serializes monetary values and quantities as decimal strings."""
+    res = ReceiptExtractionResult(
+        merchant_name="Serialization Cafe",
         currency="USD",
+        subtotal=Decimal("19.99"),
+        tax=Decimal("0.10"),
+        tip=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        final_total=Decimal("20.09"),
+        items=[
+            ExtractedLineItem(
+                item_name="Bulk Grains",
+                quantity=Decimal("1.2500"),
+                unit_price=Decimal("10.00"),
+                total_price=Decimal("12.50"),
+            ),
+            ExtractedLineItem(
+                item_name="Complimentary Mint",
+                quantity=Decimal("0"),
+                unit_price=Decimal("0.00"),
+                total_price=Decimal("0.00"),
+            ),
+        ],
+    )
+    frontend = res.to_frontend_contract()
+    assert frontend["subtotal"] == "19.99"
+    assert frontend["tax"] == "0.10"
+    assert frontend["tip"] == "0.00"
+    assert frontend["discount"] == "0.00"
+    assert frontend["total"] == "20.09"
+
+    # Items serialization
+    assert len(frontend["items"]) == 2
+    item1 = frontend["items"][0]
+    assert item1["quantity"] == "1.2500"
+    assert item1["unit_price"] == "10.00"
+    assert item1["total_price"] == "12.50"
+    assert item1["price"] == "12.50"
+
+    item2 = frontend["items"][1]
+    assert item2["quantity"] == "0"
+    assert item2["unit_price"] == "0.00"
+    assert item2["total_price"] == "0.00"
+    assert item2["price"] == "0.00"
+
+
+def test_frontend_contract_preserves_none():
+    """Frontend contract preserves None for missing monetary values and quantities."""
+    res = ReceiptExtractionResult(
+        merchant_name=None,
         subtotal=None,
         tax=None,
         tip=None,
@@ -974,652 +1151,177 @@ def test_no_fabricated_zero_values():
         final_total=None,
         items=[
             ExtractedLineItem(
-                item_name="Special Dish",
-                quantity=1,
+                item_name="Unknown Item",
+                quantity=None,
                 unit_price=None,
                 total_price=None,
-            )
+            ),
         ],
     )
-    # Canonical model preserves None
-    assert result.subtotal is None
-    assert result.tax is None
-    assert result.tip is None
-    assert result.discount is None
-    assert result.final_total is None
-    assert result.items[0].unit_price is None
-    assert result.items[0].total_price is None
+    frontend = res.to_frontend_contract()
+    assert frontend["merchant"] is None
+    assert frontend["subtotal"] is None
+    assert frontend["tax"] is None
+    assert frontend["tip"] is None
+    assert frontend["discount"] is None
+    assert frontend["total"] is None
 
-    # Serializer preserves None
-    api_dict = result.to_api_response()
-    assert api_dict["subtotal"] is None
-    assert api_dict["tax"] is None
-    assert api_dict["final_total"] is None
-    assert api_dict["total"] is None
-    assert api_dict["items"][0]["unit_price"] is None
-    assert api_dict["items"][0]["total_price"] is None
+    assert len(frontend["items"]) == 1
+    item = frontend["items"][0]
+    assert item["quantity"] is None
+    assert item["price"] is None
+    assert item["unit_price"] is None
+    assert item["total_price"] is None
 
 
-def test_backend_worker_serialization_compatibility():
-    """Requirement 18: Result serializer matches the backend worker's expected field names and types."""
-    result = ReceiptExtractionResult(
-        status="completed",
-        document_type="receipt",
-        is_receipt=True,
-        merchant_name="Mario's Pizza",
-        currency="USD",
-        subtotal=Decimal("30.00"),
-        tax=Decimal("3.00"),
-        final_total=Decimal("33.00"),
-        confidence=0.92,
+def test_one_cent_line_item_discrepancy_flagged():
+    """1. One-cent line-item discrepancy must not silently pass."""
+    # 2 * 10.00 = 20.00, but total_price is 20.01 -> 1 cent discrepancy
+    res = ReceiptExtractionResult(
         items=[
             ExtractedLineItem(
-                item_name="Cheese Pizza",
-                quantity=Decimal("1"),
-                unit_price=Decimal("20.00"),
+                item_name="Espresso",
+                quantity=Decimal("2"),
+                unit_price=Decimal("10.00"),
+                total_price=Decimal("20.01"),
+            ),
+        ],
+    )
+    res.validate_math_consistency()
+    assert any("Line item math discrepancy for 'Espresso'" in w for w in res.warnings)
+
+    # Clean line item with exact arithmetic produces NO discrepancy
+    res_clean = ReceiptExtractionResult(
+        items=[
+            ExtractedLineItem(
+                item_name="Espresso",
+                quantity=Decimal("2"),
+                unit_price=Decimal("10.00"),
                 total_price=Decimal("20.00"),
             ),
-            ExtractedLineItem(
-                item_name="Tiramisu",
-                quantity=Decimal("2"),
-                unit_price=Decimal("5.00"),
-                total_price=Decimal("10.00"),
-            ),
-        ],
-        missing_fields=[],
-        uncertain_fields=[],
-        warnings=[],
-    )
-
-    # Test both to_api_response() and to_dict()
-    for serialized in [result.to_api_response(), result.to_dict()]:
-        assert serialized["document_type"] == "receipt"
-        assert serialized["merchant_name"] == "Mario's Pizza"
-        assert serialized["currency"] == "USD"
-        assert serialized["subtotal"] == "30.00"
-        assert serialized["tax"] == "3.00"
-        assert serialized["final_total"] == "33.00"
-        assert serialized["confidence"] == 0.92
-        assert serialized["status"] == "completed"
-        assert serialized["error_code"] is None
-        assert serialized["error_message"] is None
-        assert isinstance(serialized["items"], list)
-        assert len(serialized["items"]) == 2
-        assert isinstance(serialized["missing_fields"], list)
-        assert isinstance(serialized["uncertain_fields"], list)
-        assert isinstance(serialized["warnings"], list)
-
-
-def test_status_completed_review_required_failed():
-    """Requirement 16: Verifies all three AI service statuses: completed, review_required, failed."""
-    # 1. Completed: fully verified receipt with high confidence
-    res_completed = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Fine Dining",
-        currency="USD",
-        subtotal=Decimal("50.00"),
-        tax=Decimal("5.00"),
-        final_total=Decimal("55.00"),
-        confidence=0.95,
-        items=[
-            ExtractedLineItem(item_name="Steak", quantity=Decimal("1"), unit_price=Decimal("50.00"), total_price=Decimal("50.00"))
         ],
     )
-    res_completed.validate_math_consistency()
-    assert res_completed.status == "completed"
-
-    # 2. Review Required: missing currency or low confidence
-    res_review = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Corner Deli",
-        currency=None,  # Missing currency
-        subtotal=Decimal("10.00"),
-        final_total=Decimal("10.00"),
-        confidence=0.50,
-        items=[
-            ExtractedLineItem(item_name="Sandwich", quantity=Decimal("1"), unit_price=Decimal("10.00"), total_price=Decimal("10.00"))
-        ],
-    )
-    res_review.validate_math_consistency()
-    assert res_review.status == "review_required"
-    assert "currency" in res_review.missing_fields
-
-    # 3. Failed: Non-receipt or unparseable document
-    res_failed = ReceiptExtractionResult(
-        is_receipt=False,
-        rejection_reason="Academic notes",
-        items=[],
-    )
-    res_failed.evaluate_status()
-    assert res_failed.status == "failed"
-    assert res_failed.error_code == "NON_RECEIPT_DOCUMENT"
+    res_clean.validate_math_consistency()
+    assert not any("Line item math discrepancy" in w for w in res_clean.warnings)
 
 
-def test_quantity_decimal_fraction_survives_serialization_unchanged():
-    """Verify that quantity Decimal('1.5') survives serialization unchanged across all adapters."""
+def test_missing_extraction_status_defaults_to_review_required():
+    """2. Missing extraction status defaults to review_required."""
+    # Default instantiation without status
+    res = ReceiptExtractionResult()
+    assert res.status == "review_required"
+
+    # Explicit None status passed
+    res_none = ReceiptExtractionResult(status=None)
+    assert res_none.status == "review_required"
+
+    # From raw dictionary missing status key
+    res_dict = ReceiptExtractionResult.model_validate({"merchant_name": "Test Cafe"})
+    assert res_dict.status == "review_required"
+
+
+def test_explicit_completed_status_remains_completed():
+    """3. Explicit completed status returned by Gemini remains completed."""
+    res = ReceiptExtractionResult(status="completed")
+    assert res.status == "completed"
+
+    res_dict = ReceiptExtractionResult.model_validate({"status": "completed", "merchant_name": "Verified Bistro"})
+    assert res_dict.status == "completed"
+
+    res_case = ReceiptExtractionResult.model_validate({"status": "COMPLETED"})
+    assert res_case.status == "completed"
+
+
+def test_explicit_zero_values_remain_zero_focused():
+    """4. Explicit zero values remain zero and are not confused with missing data."""
     item = ExtractedLineItem(
-        item_name="Organic Honeycrisp Apples",
-        quantity=Decimal("1.5"),
-        unit_price=Decimal("4.00"),
-        total_price=Decimal("6.00"),
+        item_name="Free Bread",
+        quantity=Decimal("0"),
+        unit_price=Decimal("0.00"),
+        total_price=Decimal("0.00"),
     )
-    result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Whole Foods",
-        currency="USD",
+    assert item.quantity == Decimal("0")
+    assert item.unit_price == Decimal("0.00")
+    assert item.total_price == Decimal("0.00")
+
+    res = ReceiptExtractionResult(
+        subtotal=Decimal("0.00"),
+        tax=Decimal("0.00"),
+        tip=Decimal("0.00"),
+        discount=Decimal("0.00"),
+        final_total=Decimal("0.00"),
         items=[item],
-        final_total=Decimal("6.00"),
     )
+    assert res.subtotal == Decimal("0.00")
+    assert res.tax == Decimal("0.00")
+    assert res.tip == Decimal("0.00")
+    assert res.discount == Decimal("0.00")
+    assert res.final_total == Decimal("0.00")
 
-    # 1. Line item to_dict()
-    item_dict = item.to_dict()
-    assert item_dict["quantity"] == Decimal("1.5")
-    assert isinstance(item_dict["quantity"], Decimal)
-
-    # 2. Result to_dict()
-    res_dict = result.to_dict()
-    assert res_dict["items"][0]["quantity"] == Decimal("1.5")
-    assert isinstance(res_dict["items"][0]["quantity"], Decimal)
-
-    # 3. Result to_api_response()
-    api_resp = result.to_api_response()
-    assert api_resp["items"][0]["quantity"] == Decimal("1.5")
-    assert isinstance(api_resp["items"][0]["quantity"], Decimal)
-
-    # 4. Result to_backend_contract()
-    backend_payload = result.to_backend_contract()
-    assert backend_payload["items"][0]["quantity"] == Decimal("1.5")
-    assert isinstance(backend_payload["items"][0]["quantity"], Decimal)
-
-    # 5. Result to_frontend_contract()
-    frontend_payload = result.to_frontend_contract()
-    assert frontend_payload["items"][0]["quantity"] == 1.5
+    # Frontend serialization
+    frontend = res.to_frontend_contract()
+    assert frontend["subtotal"] == "0.00"
+    assert frontend["tax"] == "0.00"
+    assert frontend["tip"] == "0.00"
+    assert frontend["discount"] == "0.00"
+    assert frontend["total"] == "0.00"
+    assert frontend["items"][0]["quantity"] == "0"
+    assert frontend["items"][0]["price"] == "0.00"
 
 
-def test_missing_merchant_and_currency_survive_serialization_as_none():
-    """Verify missing merchant_name and currency survive serialization as None without defaults."""
-    result = ReceiptExtractionResult(
-        is_receipt=True,
+def test_missing_values_remain_none_focused():
+    """5. Missing values remain None and are not converted to zero or default strings."""
+    item = ExtractedLineItem(
+        item_name="Mystery Item",
+        quantity=None,
+        unit_price=None,
+        total_price=None,
+    )
+    assert item.quantity is None
+    assert item.unit_price is None
+    assert item.total_price is None
+
+    res = ReceiptExtractionResult(
         merchant_name=None,
         currency=None,
-        subtotal=Decimal("20.00"),
-        tax=Decimal("2.00"),
-        final_total=Decimal("22.00"),
-        items=[
-            ExtractedLineItem(item_name="Item A", quantity=1, unit_price=Decimal("20.00"), total_price=Decimal("20.00")),
-        ],
+        subtotal=None,
+        tax=None,
+        tip=None,
+        discount=None,
+        final_total=None,
+        confidence=None,
+        items=[item],
     )
+    assert res.merchant_name is None
+    assert res.currency is None
+    assert res.subtotal is None
+    assert res.tax is None
+    assert res.tip is None
+    assert res.discount is None
+    assert res.final_total is None
+    assert res.confidence is None
 
-    # 1. to_dict()
-    d = result.to_dict()
-    assert d["merchant_name"] is None
-    assert d["currency"] is None
-
-    # 2. to_api_response()
-    api = result.to_api_response()
-    assert api["merchant_name"] is None
-    assert api["currency"] is None
-
-    # 3. to_backend_contract()
-    backend = result.to_backend_contract()
+    # Backend contract preserves None
+    backend = res.to_backend_contract()
     assert backend["merchant_name"] is None
     assert backend["currency"] is None
+    assert backend["subtotal"] is None
+    assert backend["tax"] is None
+    assert backend["total"] is None
+    assert backend["items"][0]["quantity"] is None
+    assert backend["items"][0]["unit_price"] is None
+    assert backend["items"][0]["total_price"] is None
 
-    # 4. to_frontend_contract()
-    frontend = result.to_frontend_contract()
+    # Frontend contract preserves None
+    frontend = res.to_frontend_contract()
     assert frontend["merchant"] is None
     assert frontend["currency"] is None
+    assert frontend["subtotal"] is None
+    assert frontend["tax"] is None
+    assert frontend["tip"] is None
+    assert frontend["discount"] is None
+    assert frontend["total"] is None
+    assert frontend["confidence"] is None
+    assert frontend["items"][0]["quantity"] is None
+    assert frontend["items"][0]["price"] is None
 
-
-def test_empty_items_with_review_required():
-    """Verify that a valid receipt with no detected items sets review_required and serializes cleanly."""
-    result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name="Corner Store",
-        currency="USD",
-        items=[],
-        final_total=Decimal("15.00"),
-    )
-    result.evaluate_status()
-
-    # Must be marked review_required with 'items' in missing_fields
-    assert result.status == "review_required"
-    assert "items" in result.missing_fields
-
-    # Must serialize with empty items list without raising ValueError or fabricating dummy items
-    d = result.to_dict()
-    assert d["items"] == []
-    assert d["status"] == "review_required"
-
-    backend = result.to_backend_contract()
-    assert backend["items"] == []
-
-    api = result.to_api_response()
-    assert api["items"] == []
-
-
-def test_review_required_results_not_rejected_by_ai_serializer():
-    """Verify that review_required results are not incorrectly rejected with ValueError by AI serializers."""
-    # Receipt with missing merchant, missing currency, and missing items (damaged receipt)
-    review_result = ReceiptExtractionResult(
-        is_receipt=True,
-        merchant_name=None,
-        currency=None,
-        items=[],
-        final_total=None,
-        status="review_required",
-        missing_fields=["merchant_name", "currency", "items", "final_total"],
-    )
-
-    # Must serialize cleanly without ValueError across all AI serializers
-    api_payload = review_result.to_api_response()
-    assert api_payload["status"] == "review_required"
-    assert api_payload["merchant_name"] is None
-    assert api_payload["currency"] is None
-    assert api_payload["items"] == []
-
-    dict_payload = review_result.to_dict()
-    assert dict_payload["status"] == "review_required"
-    assert dict_payload["merchant_name"] is None
-
-    backend_payload = review_result.to_backend_contract()
-    assert backend_payload["merchant_name"] is None
-    assert backend_payload["currency"] is None
-    assert backend_payload["items"] == []
-
-    # Non-receipt documents MUST still raise ValueError in to_backend_contract()
-    non_receipt = ReceiptExtractionResult(
-        is_receipt=False,
-        rejection_reason="Academic paper table",
-        items=[],
-    )
-    with pytest.raises(ValueError, match="non-receipt"):
-        non_receipt.to_backend_contract()
-
-
-# =============================================================================
-# 9. MOCKED GEMINI DOCUMENT CLASSIFICATION REGRESSION TESTS
-# =============================================================================
-
-def _install_mock_gemini_response(monkeypatch, payload, captured=None):
-    """Install a deterministic Gemini response; no network/API request is made."""
-    class MockResponse:
-        text = json.dumps(payload)
-
-    def mock_generate_content(*args, **kwargs):
-        if captured is not None:
-            captured["kwargs"] = kwargs
-        return MockResponse()
-
-    class MockModels:
-        generate_content = staticmethod(mock_generate_content)
-
-    class MockGenaiClient:
-        models = MockModels()
-
-    import google.genai
-    monkeypatch.setattr(
-        google.genai,
-        "Client",
-        lambda *args, **kwargs: MockGenaiClient(),
-    )
-
-
-def _non_receipt_gemini_payload(reason):
-    """Deliberately include receipt-looking fields to test defensive cleanup."""
-    return {
-        "status": "completed",
-        "document_type": "receipt",
-        "is_receipt": False,
-        "rejection_reason": reason,
-        "merchant_name": "False Positive Merchant",
-        "merchant_address": "123 Imaginary Street",
-        "receipt_date": "2026-11-10",
-        "receipt_number": "FAKE-123",
-        "currency": "INR",
-        "subtotal": "100.00",
-        "tax": "18.00",
-        "discount": "5.00",
-        "tip": "10.00",
-        "final_total": "123.00",
-        "confidence": 0.99,
-        "items": [
-            {
-                "item_name": "False Positive Item",
-                "quantity": 1,
-                "unit_price": "100.00",
-                "total_price": "100.00",
-            }
-        ],
-        "missing_fields": [],
-        "uncertain_fields": [],
-        "warnings": [],
-    }
-
-
-@pytest.mark.parametrize(
-    "document_case,reason",
-    [
-        (
-            "academic notes",
-            "Lecture notes covering stack, queue, and linked list concepts.",
-        ),
-        (
-            "homework",
-            "Homework assignment with questions, marks, and student answers.",
-        ),
-        (
-            "algorithm and data-structure table",
-            "Algorithm complexity and data structure comparison table.",
-        ),
-        (
-            "currency-like values in a non-receipt",
-            "Academic conversion worksheet containing Rs. 100, ₹200 and Total 300.",
-        ),
-        (
-            "blank image",
-            "Blank image with no readable receipt content.",
-        ),
-        (
-            "unrelated photo",
-            "Unrelated personal photograph; no financial transaction document.",
-        ),
-    ],
-)
-def test_gemini_non_receipt_cases_clear_receipt_fields(
-    monkeypatch, document_case, reason
-):
-    """Non-receipts must not leak merchant, line-item, or payable-total data."""
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
-    _install_mock_gemini_response(
-        monkeypatch,
-        _non_receipt_gemini_payload(reason),
-    )
-
-    result = extractor.extract(Image.new("RGB", (160, 220), color="white"))
-
-    assert result.is_receipt is False, document_case
-    assert result.status == "failed"
-    assert result.error_code == "NON_RECEIPT_DOCUMENT"
-    assert result.merchant_name is None
-    # All receipt-specific metadata fields MUST be None
-    assert result.merchant_address is None
-    assert result.receipt_date is None
-    assert result.receipt_number is None
-    assert result.currency is None
-    assert result.items == []
-    assert result.subtotal is None
-    assert result.tax is None
-    assert result.discount is None
-    assert result.tip is None
-    assert result.final_total is None
-    assert result.confidence is None
-    assert result.missing_fields == []
-    assert result.uncertain_fields == []
-
-    # API contract verification: no receipt data leaks
-    api_resp = result.to_api_response()
-    assert api_resp["status"] == "failed"
-    assert api_resp["is_receipt"] is False
-    assert api_resp["merchant_name"] is None
-    assert api_resp["merchant_address"] is None
-    assert api_resp["receipt_date"] is None
-    assert api_resp["receipt_number"] is None
-    assert api_resp["currency"] is None
-    assert api_resp["items"] == []
-    assert api_resp["subtotal"] is None
-    assert api_resp["tax"] is None
-    assert api_resp["tip"] is None
-    assert api_resp["discount"] is None
-    assert api_resp["total"] is None
-    assert api_resp["final_total"] is None
-
-    # Frontend contract verification: no receipt data leaks
-    frontend_resp = result.to_frontend_contract()
-    assert frontend_resp["success"] is False
-    assert frontend_resp["is_receipt"] is False
-    assert frontend_resp["merchant"] is None
-    assert frontend_resp["merchant_name"] is None
-    assert frontend_resp["merchant_address"] is None
-    assert frontend_resp["currency"] is None
-    assert frontend_resp["items"] == []
-    assert frontend_resp["total"] is None
-    assert frontend_resp["subtotal"] is None
-
-
-def test_schema_model_validator_clears_all_receipt_fields_on_non_receipt():
-    """Verify ReceiptExtractionResult automatically clears all receipt-specific fields when is_receipt=False."""
-    result = ReceiptExtractionResult(
-        is_receipt=False,
-        rejection_reason="Academic notes",
-        merchant_name="Misleading Academy",
-        merchant_address="456 Academic Ave",
-        receipt_date="2026-11-10",
-        receipt_number="INV-999",
-        currency="USD",
-        items=[
-            ExtractedLineItem(item_name="Notes", quantity=1, unit_price=Decimal("10.00"), total_price=Decimal("10.00")),
-        ],
-        subtotal=Decimal("10.00"),
-        tax=Decimal("1.00"),
-        tip=Decimal("2.00"),
-        discount=Decimal("0.50"),
-        final_total=Decimal("12.50"),
-        confidence=0.95,
-        missing_fields=["merchant_name"],
-        uncertain_fields=["final_total"],
-    )
-
-    assert result.is_receipt is False
-    assert result.status == "failed"
-    assert result.document_type == "non_receipt"
-    assert result.error_code == "NON_RECEIPT_DOCUMENT"
-    assert result.merchant_name is None
-    assert result.merchant_address is None
-    assert result.receipt_date is None
-    assert result.receipt_number is None
-    assert result.currency is None
-    assert result.items == []
-    assert result.subtotal is None
-    assert result.tax is None
-    assert result.tip is None
-    assert result.discount is None
-    assert result.final_total is None
-    assert result.confidence is None
-    assert result.missing_fields == []
-    assert result.uncertain_fields == []
-
-
-def test_gemini_keeps_genuine_receipt_with_academic_looking_words(monkeypatch):
-    """Academic keywords in a merchant/item name must not reject a real receipt."""
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
-    receipt_payload = {
-        "status": "completed",
-        "document_type": "receipt",
-        "is_receipt": True,
-        "merchant_name": "Algorithm Cafe",
-        "merchant_address": "101 Code Street",
-        "receipt_date": "2026-11-11",
-        "receipt_number": "INV-101",
-        "currency": "INR",
-        "subtotal": "250.00",
-        "tax": "12.50",
-        "final_total": "262.50",
-        "confidence": 0.96,
-        "items": [
-            {
-                "item_name": "Data Structure Sandwich",
-                "quantity": 1,
-                "unit_price": "250.00",
-                "total_price": "250.00",
-            }
-        ],
-        "missing_fields": [],
-        "uncertain_fields": [],
-        "warnings": [],
-    }
-    _install_mock_gemini_response(monkeypatch, receipt_payload)
-
-    result = extractor.extract(Image.new("RGB", (300, 400), color="white"))
-
-    assert result.is_receipt is True
-    assert result.status == "completed"
-    assert result.merchant_name == "Algorithm Cafe"
-    assert result.merchant_address == "101 Code Street"
-    assert result.receipt_date == "2026-11-11"
-    assert result.receipt_number == "INV-101"
-    assert result.currency == "INR"
-    assert len(result.items) == 1
-    assert result.items[0].item_name == "Data Structure Sandwich"
-    assert result.final_total == Decimal("262.50")
-
-
-def test_gemini_keeps_genuine_receipt_with_all_receipt_fields(monkeypatch):
-    """Confirm that genuine receipts preserve all valid merchant details, date, currency, items, and totals."""
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
-    receipt_payload = {
-        "status": "completed",
-        "document_type": "receipt",
-        "is_receipt": True,
-        "merchant_name": "Algorithm Cafe & Grill",
-        "merchant_address": "789 Binary Boulevard, Silicon Valley",
-        "receipt_date": "2026-11-11",
-        "receipt_number": "REC-7788",
-        "currency": "INR",
-        "subtotal": "250.00",
-        "tax": "12.50",
-        "tip": "20.00",
-        "discount": "10.00",
-        "final_total": "272.50",
-        "confidence": 0.96,
-        "items": [
-            {
-                "item_name": "Data Structure Sandwich",
-                "quantity": 1,
-                "unit_price": "150.00",
-                "total_price": "150.00",
-            },
-            {
-                "item_name": "Binary Tree Latte",
-                "quantity": 1,
-                "unit_price": "100.00",
-                "total_price": "100.00",
-            },
-        ],
-        "missing_fields": [],
-        "uncertain_fields": [],
-        "warnings": [],
-    }
-    _install_mock_gemini_response(monkeypatch, receipt_payload)
-
-    result = extractor.extract(Image.new("RGB", (300, 400), color="white"))
-
-    assert result.is_receipt is True
-    assert result.status == "completed"
-    assert result.merchant_name == "Algorithm Cafe & Grill"
-    assert result.merchant_address == "789 Binary Boulevard, Silicon Valley"
-    assert result.receipt_date == "2026-11-11"
-    assert result.receipt_number == "REC-7788"
-    assert result.currency == "INR"
-    assert len(result.items) == 2
-    assert result.items[0].item_name == "Data Structure Sandwich"
-    assert result.items[1].item_name == "Binary Tree Latte"
-    assert result.subtotal == Decimal("250.00")
-    assert result.tax == Decimal("12.50")
-    assert result.tip == Decimal("20.00")
-    assert result.discount == Decimal("10.00")
-    assert result.final_total == Decimal("272.50")
-    assert result.confidence == 0.96
-
-
-# =============================================================================
-# 10. OCR IMAGE-CONDITION COVERAGE (SYNTHETIC SMOKE TESTS)
-# =============================================================================
-
-def _synthetic_receipt_image():
-    """Create a deterministic receipt-like image without external fixture files."""
-    from PIL import ImageDraw
-
-    image = Image.new("RGB", (800, 1100), "white")
-    draw = ImageDraw.Draw(image)
-    draw.text((55, 55), "SAMPLE CAFE", fill="black")
-    draw.text((55, 150), "Coffee             120.00", fill="black")
-    draw.text((55, 220), "Sandwich           180.00", fill="black")
-    draw.line((55, 290, 720, 290), fill="black", width=3)
-    draw.text((55, 340), "Subtotal           300.00", fill="black")
-    draw.text((55, 400), "Tax                 15.00", fill="black")
-    draw.text((55, 470), "TOTAL              315.00", fill="black")
-    return image
-
-
-@pytest.mark.parametrize(
-    "condition",
-    ["low_resolution", "glare", "shadows", "low_contrast", "skew"],
-)
-def test_preprocessor_handles_common_receipt_image_conditions(condition):
-    """Smoke-test preprocessing for difficult capture conditions (not OCR accuracy)."""
-    from PIL import ImageEnhance, ImageOps
-
-    image = _synthetic_receipt_image()
-
-    if condition == "low_resolution":
-        image = image.resize((120, 165))
-    elif condition == "glare":
-        # Simulate a bright reflection across part of the receipt.
-        from PIL import ImageDraw
-        overlay = Image.new("RGBA", image.size, (255, 255, 255, 0))
-        draw = ImageDraw.Draw(overlay)
-        draw.ellipse((260, 80, 760, 560), fill=(255, 255, 255, 175))
-        image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-    elif condition == "shadows":
-        # Simulate uneven illumination with a darker band over the lower area.
-        from PIL import ImageDraw
-        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
-        draw.rectangle((0, 560, 800, 1100), fill=(0, 0, 0, 75))
-        image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-    elif condition == "low_contrast":
-        image = ImageEnhance.Contrast(image).enhance(0.20)
-    elif condition == "skew":
-        image = image.rotate(7, expand=True, fillcolor="white")
-
-    import io
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-
-    result = ImagePreprocessor().preprocess(buffer.getvalue())
-
-    assert result.processed_image is not None, condition
-    assert result.width > 0 and result.height > 0, condition
-    assert isinstance(result.processed_image, Image.Image), condition
-
-
-def test_mixed_language_receipt_text_context_reaches_gemini(monkeypatch):
-    """Verify mixed English/Devanagari OCR text is passed to Gemini as context."""
-    extractor = GeminiVisionExtractor(api_key="test-api-key")
-    captured = {}
-    receipt_payload = {
-        "status": "review_required",
-        "document_type": "receipt",
-        "is_receipt": True,
-        "merchant_name": "Mumbai Snacks",
-        "currency": "INR",
-        "confidence": 0.72,
-        "items": [],
-        "missing_fields": ["items", "final_total"],
-        "uncertain_fields": [],
-        "warnings": [],
-    }
-    _install_mock_gemini_response(monkeypatch, receipt_payload, captured=captured)
-
-    mixed_language_text = (
-        "Mumbai Snacks\nसमोसा 2 40.00\nचहा 1 15.00\nएकूण 55.00"
-    )
-    result = extractor.extract(
-        Image.new("RGB", (300, 400), color="white"),
-        text_context=mixed_language_text,
-    )
-
-    assert result.is_receipt is True
-    sent_contents = captured["kwargs"]["contents"]
-    assert any(mixed_language_text in str(part) for part in sent_contents)

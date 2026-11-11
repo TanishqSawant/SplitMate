@@ -17,7 +17,7 @@ def _upload_and_extract_for_client(c, total="30.00", subtotal="30.00", tax="0.00
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
     assert upload_resp.status_code == 201
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     extract_resp = c.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -86,7 +86,7 @@ def test_user_a_cannot_access_user_b_receipt(db_session, client):
     receipt_b = _upload_and_extract_for_client(client_b)
 
     # User A tries to get User B's receipt
-    resp = client.get(f"/api/receipts/{receipt_b['id']}")
+    resp = client.get(f"/api/receipts/{receipt_b['receipt_id']}")
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Receipt not found."
 
@@ -106,7 +106,7 @@ def test_user_a_cannot_create_expense_with_user_b_receipt(db_session, client):
         "/api/expenses",
         json={
             "group_id": grp_a["id"],
-            "receipt_id": receipt_b["id"],
+            "receipt_id": receipt_b["receipt_id"],
             "total_amount": "50.00",
             "currency": "USD",
         },
@@ -126,7 +126,7 @@ def test_user_a_cannot_modify_user_b_expense_assignments(db_session, client):
         "/api/expenses",
         json={
             "group_id": grp_b["id"],
-            "receipt_id": receipt_b["id"],
+            "receipt_id": receipt_b["receipt_id"],
             "total_amount": "25.00",
             "currency": "USD",
         },
@@ -159,7 +159,7 @@ def test_user_a_cannot_initialize_payments_for_user_b_group(db_session, client):
         "/api/expenses",
         json={
             "group_id": grp_b["id"],
-            "receipt_id": receipt_b["id"],
+            "receipt_id": receipt_b["receipt_id"],
             "total_amount": "20.00",
             "currency": "USD",
         },
@@ -185,7 +185,7 @@ def test_user_a_cannot_access_user_b_payment_record(db_session, client):
         "/api/expenses",
         json={
             "group_id": grp_b["id"],
-            "receipt_id": receipt_b["id"],
+            "receipt_id": receipt_b["receipt_id"],
             "total_amount": "15.00",
             "currency": "USD",
         },
@@ -238,7 +238,7 @@ def test_user_cannot_pay_another_members_share(db_session):
         "/api/receipts/upload",
         files={"file": ("r.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    r_id = upload_resp.json()["id"]
+    r_id = upload_resp.json()["receipt_id"]
     client_alice.post(
         f"/api/receipts/{r_id}/extraction",
         json={
@@ -288,13 +288,25 @@ def test_user_cannot_pay_another_members_share(db_session):
     assert resp.status_code == 403
     assert "only manage or pay your own share" in resp.json()["detail"].lower()
 
-    # Bob CAN initiate his own order (passes auth check; returns 200 with mock, or 501/502 without live PayPal creds)
-    bob_resp = client_bob.post(
-        f"/api/payments/{bob_payment['id']}/create-order",
-        json={},
-    )
-    assert bob_resp.status_code in (200, 501, 502)
-    assert bob_resp.status_code != 403
+    # Bob CAN initiate his own order (auth check passes; returns 200 with mocked PayPal service)
+    from unittest.mock import MagicMock
+    from app.api.routes.payments import get_paypal_service
+    mock_service = MagicMock()
+    mock_service.create_order.return_value = {
+        "id": "PAYPAL-ORDER-BOB",
+        "status": "CREATED",
+        "approval_url": "https://sandbox.paypal.com",
+    }
+    client_bob.app.dependency_overrides[get_paypal_service] = lambda: mock_service
+    try:
+        bob_resp = client_bob.post(
+            f"/api/payments/{bob_payment['id']}/create-order",
+            json={},
+        )
+        assert bob_resp.status_code == 200
+        assert bob_resp.json()["status"] == "order_created"
+    finally:
+        client_bob.app.dependency_overrides.pop(get_paypal_service, None)
 
 
 def test_legitimate_group_member_can_access_shared_resources(db_session):
@@ -319,7 +331,7 @@ def test_legitimate_group_member_can_access_shared_resources(db_session):
         "/api/expenses",
         json={
             "group_id": grp["id"],
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "40.00",
             "currency": "USD",
         },
@@ -335,6 +347,6 @@ def test_legitimate_group_member_can_access_shared_resources(db_session):
     assert exp_resp.status_code == 200
 
     # User B can view the receipt linked to the shared group expense
-    rcpt_resp = client_b.get(f"/api/receipts/{receipt['id']}")
+    rcpt_resp = client_b.get(f"/api/receipts/{receipt['receipt_id']}")
     assert rcpt_resp.status_code == 200
 
