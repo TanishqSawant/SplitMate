@@ -19,7 +19,7 @@ from decimal import Decimal
 
 import pytest
 
-from tests.conftest import TEST_INTERNAL_SERVICE_SECRET, VALID_JPEG_BYTES
+from tests.conftest import TEST_INTERNAL_SERVICE_SECRET, VALID_JPEG_BYTES, DEFAULT_TEST_USER_EMAIL
 
 
 # ===========================================================================
@@ -151,13 +151,28 @@ class TestPaymentAPIEndpoints:
     @pytest.fixture(autouse=True)
     def force_mock_mode(self):
         """Explicitly configure mock mode for all mock-mode tests to ensure isolation."""
-        from app.services.paypal import paypal_service
-        prev_mode = paypal_service.mock_mode
-        paypal_service.mock_mode = True
+        services = []
+        try:
+            from app.services.paypal import paypal_service as ps1
+            if hasattr(ps1, "mock_mode"):
+                services.append(ps1)
+        except ImportError:
+            pass
+        try:
+            from app.services.paypal_service import paypal_service as ps2
+            if hasattr(ps2, "mock_mode"):
+                services.append(ps2)
+        except ImportError:
+            pass
+
+        prev_modes = [(s, s.mock_mode) for s in services]
+        for s in services:
+            s.mock_mode = True
         try:
             yield
         finally:
-            paypal_service.mock_mode = prev_mode
+            for s, prev in prev_modes:
+                s.mock_mode = prev
 
     def _create_expense_with_payment(self, client):
         """Helper: creates group → member → receipt → expense → assignments → initializes payments.
@@ -174,7 +189,7 @@ class TestPaymentAPIEndpoints:
         # Add member (returns 201)
         m1 = client.post(
             f"/api/groups/{group_id}/members",
-            json={"name": "Alice", "email": "alice@test.com"},
+            json={"name": "Alice", "email": DEFAULT_TEST_USER_EMAIL},
         )
         assert m1.status_code == 201, m1.text
         payer_id = m1.json()["id"]
@@ -185,7 +200,7 @@ class TestPaymentAPIEndpoints:
             files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
         )
         assert upload_resp.status_code == 201, upload_resp.text
-        receipt_id = upload_resp.json()["id"]
+        receipt_id = upload_resp.json()["receipt_id"]
 
         # Populate extraction items
         extract_resp = client.post(

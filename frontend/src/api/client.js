@@ -1,4 +1,3 @@
-
 /**
  * SplitMate API Client Service Layer
  *
@@ -27,13 +26,20 @@ class ApiClient {
     this.onStatusChangeCallbacks = new Set();
   }
 
+  /**
+   * Subscribe to backend availability changes.
+   *
+   * @param {function({isOnline: boolean}): void} callback
+   * @returns {function(): void} Unsubscribe function.
+   */
   subscribeStatus(callback) {
     this.onStatusChangeCallbacks.add(callback);
 
-    callback({
-      isOnline: this.isBackendAvailable,
-      baseURL: this.baseURL,
-    });
+    if (this.isBackendAvailable !== null) {
+      callback({
+        isOnline: this.isBackendAvailable,
+      });
+    }
 
     return () => this.onStatusChangeCallbacks.delete(callback);
   }
@@ -42,23 +48,29 @@ class ApiClient {
     if (this.isBackendAvailable !== isOnline) {
       this.isBackendAvailable = isOnline;
 
-      this.onStatusChangeCallbacks.forEach((callback) =>
-        callback({
-          isOnline: this.isBackendAvailable,
-          baseURL: this.baseURL,
-        })
-      );
+      this.onStatusChangeCallbacks.forEach((callback) => {
+        try {
+          callback({
+            isOnline,
+          });
+        } catch (e) {
+          console.error(
+            '[SplitMate API] Error executing status callback:',
+            e
+          );
+        }
+      });
     }
   }
 
   /**
-   * Check backend health using localhost and 127.0.0.1.
+   * Check whether the backend is reachable, auto-detecting localhost vs 127.0.0.1.
+   *
+   * @returns {Promise<boolean>}
    */
   async checkHealth() {
-    const candidates = [];
-    const configuredBase = this.baseURL.replace(/\/api\/?$/, '');
-
-    candidates.push(configuredBase);
+    const configuredBase = this.baseURL;
+    const candidates = [configuredBase];
 
     if (configuredBase.includes('localhost:8000')) {
       candidates.push(
@@ -72,17 +84,15 @@ class ApiClient {
 
     for (const host of [...new Set(candidates)]) {
       for (const healthPath of [
-        API_ENDPOINTS.HEALTH,
+        '/health',
         '/api/health',
       ]) {
+        const testUrl = `${host.replace(/\/api$/, '')}${healthPath}`;
         const controller = new AbortController();
-        const timeoutId = setTimeout(
-          () => controller.abort(),
-          3500
-        );
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
 
         try {
-          const response = await fetch(`${host}${healthPath}`, {
+          const response = await fetch(testUrl, {
             method: 'GET',
             headers: {
               Accept: 'application/json',
@@ -91,25 +101,20 @@ class ApiClient {
           });
 
           if (response.ok) {
-            const data = await response.json();
+            clearTimeout(timeoutId);
 
             if (host !== configuredBase) {
-              this.baseURL = `${host}/api`;
-
               console.info(
-                `[SplitMate API] Connected to active host: ${this.baseURL}`
+                `[SplitMate API] Auto-switching API baseURL to active host: ${host}`
               );
+              this.baseURL = host;
             }
 
             this.notifyStatus(true);
-
-            return {
-              online: true,
-              data,
-            };
+            return true;
           }
         } catch {
-          // Try the next host or health endpoint.
+          // Try next candidate
         } finally {
           clearTimeout(timeoutId);
         }
@@ -117,40 +122,39 @@ class ApiClient {
     }
 
     this.notifyStatus(false);
-
-    return {
-      online: false,
-      error: 'Unreachable',
-    };
+    return false;
   }
 
   /**
-   * Execute an API request with timeout and offline fallback.
+   * Primary request method with error normalization, dual-host retry, and fallback.
+   *
+   * @param {string} endpoint - API path relative to baseURL.
+   * @param {RequestInit & {isFormData?: boolean, timeout?: number, _retried?: boolean}} [options={}]
+   * @returns {Promise<any>}
    */
   async request(endpoint, options = {}) {
-    const url = `${this.baseURL}${endpoint}`;
+    const cleanEndpoint = endpoint.startsWith('/api/') ? endpoint.slice(4) : endpoint;
+    const url = `${this.baseURL}${cleanEndpoint.startsWith('/') ? cleanEndpoint : '/' + cleanEndpoint}`;
     const isReceiptAction =
-      endpoint.startsWith('/receipts/upload') ||
-      endpoint.includes('/extract');
+      cleanEndpoint.startsWith('/receipts/upload') ||
+      cleanEndpoint.includes('/extract');
 
     const timeoutMs =
       options.timeout ||
       (isReceiptAction ? 90000 : DEFAULT_TIMEOUT_MS);
 
+    const token = localStorage.getItem('splitmate_token');
     const headers = {
       Accept: 'application/json',
       ...(!options.isFormData && {
         'Content-Type': 'application/json',
       }),
+      ...(token && { Authorization: 'Bearer ' + token }),
       ...options.headers,
     };
 
     const controller = new AbortController();
-
-    const timeoutId = setTimeout(
-      () => controller.abort(),
-      timeoutMs
-    );
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -160,17 +164,24 @@ class ApiClient {
       });
 
       if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
+        let errorDetail = `HTTP ${response.status}: ${response.statusText}`;
 
-        throw new Error(
-          errorBody.detail ||
-            errorBody.message ||
-            `HTTP ${response.status}: ${response.statusText}`
-        );
+        try {
+          const errorJson = await response.json();
+          errorDetail =
+            errorJson.detail ||
+            errorJson.message ||
+            errorDetail;
+        } catch {
+          // Use default error string
+        }
+
+        const apiError = new Error(errorDetail);
+        apiError.status = response.status;
+        throw apiError;
       }
 
       this.notifyStatus(true);
-
       return await response.json();
     } catch (err) {
       const isNetworkError =
@@ -243,8 +254,8 @@ class ApiClient {
 
       // Never fabricate receipt extraction results.
       if (
-        endpoint.startsWith('/receipts/upload') ||
-        endpoint.startsWith('/receipts/')
+        cleanEndpoint.startsWith('/receipts/upload') ||
+        cleanEndpoint.startsWith('/receipts/')
       ) {
         throw new Error(
           'Unable to connect to the receipt extraction service. Please ensure the backend server is running and try again.'
@@ -272,24 +283,25 @@ class ApiClient {
   }
 
   /**
-   * Mock fallback handler for demo resilience.
+   * Resilient offline mock responder for core CRUD actions.
    */
   async handleMockFallback(endpoint, options = {}) {
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
+    await new Promise((resolve) => setTimeout(resolve, 80));
     const method = (options.method || 'GET').toUpperCase();
 
     // 1. Health
     if (endpoint === API_ENDPOINTS.HEALTH) {
       return {
-        status: 'ok',
-        version: '0.1.0-mock',
-        service: 'SplitMate Mock Service',
+        status: 'mock_fallback',
+        timestamp: new Date().toISOString(),
       };
     }
 
-    // 2. Current user
-    if (endpoint === API_ENDPOINTS.AUTH.CURRENT_USER) {
+    // 2. Auth
+    if (
+      endpoint === API_ENDPOINTS.AUTH.CURRENT_USER ||
+      endpoint === API_ENDPOINTS.AUTH.ME
+    ) {
       return MOCK_USERS[0];
     }
 
@@ -297,36 +309,27 @@ class ApiClient {
     if (endpoint.startsWith('/groups')) {
       if (method === 'GET') {
         if (endpoint.includes('/members')) {
-          return MOCK_USERS.map((user) => ({
-            id: user.id,
-            name: user.name,
-            email: user.email,
-          }));
+          return MOCK_USERS.slice(0, 3);
         }
 
         return MOCK_GROUPS;
       }
 
       if (method === 'POST') {
-        const body = JSON.parse(options.body || '{}');
-
         if (endpoint.includes('/members')) {
           return {
-            id: `mbr_${Date.now()}`,
-            name: body.name || 'Member',
-            email: body.email || 'member@example.com',
-            created_at: new Date().toISOString(),
+            id: `usr_mock_${Date.now()}`,
+            name: 'New Member',
+            email: 'member@splitmate.demo',
           };
         }
 
+        const body = JSON.parse(options.body || '{}');
+
         return {
-          id: `grp_${Date.now()}`,
-          name: body.name || 'New Squad',
+          id: `grp_mock_${Date.now()}`,
+          name: body.name || 'New Group',
           created_at: new Date().toISOString(),
-          members: MOCK_USERS.map((user) => ({
-            userId: user.id,
-            role: 'Member',
-          })),
         };
       }
     }
@@ -336,16 +339,14 @@ class ApiClient {
       if (method === 'GET') {
         if (endpoint.includes('/splits')) {
           return {
-            expense_id: 'exp_mock_1',
-            total_amount: 85.70,
+            expense_id: 'mock_expense',
+            total_amount: 85.5,
             currency: 'USD',
-            splits: MOCK_USERS.map((user) => ({
-              member_id: user.id,
-              member_name: user.name,
-              member_email: user.email,
-              allocated_subtotal: 15.70,
-              allocated_tax: 1.44,
-              amount: 17.14,
+            splits: MOCK_USERS.slice(0, 3).map((u, i) => ({
+              member_id: u.id,
+              member_name: u.name,
+              member_email: u.email,
+              amount: i === 0 ? 35.5 : 25.0,
               currency: 'USD',
             })),
           };
@@ -355,32 +356,30 @@ class ApiClient {
       }
 
       if (method === 'POST') {
-        const body = JSON.parse(options.body || '{}');
-
         if (endpoint.includes('/assign')) {
-          return body.assignments || [];
+          return {
+            success: true,
+            assignments_count: 3,
+          };
         }
 
         if (endpoint.includes('/initialize-payments')) {
-          return MOCK_USERS.map((user) => ({
-            id: `pay_${Date.now()}_${user.id}`,
-            expense_id: `exp_${Date.now()}`,
-            member_id: user.id,
-            amount: 17.14,
-            currency: 'USD',
-            paypal_order_id: null,
-            paypal_capture_id: null,
-            status: 'pending',
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }));
+          return [
+            {
+              id: 'mock_pay_1',
+              status: 'pending',
+              amount: 25.0,
+              currency: 'USD',
+            },
+          ];
         }
 
+        const body = JSON.parse(options.body || '{}');
+
         return {
-          id: `exp_${Date.now()}`,
-          group_id: body.group_id || 'grp_mock',
-          receipt_id: body.receipt_id || null,
-          total_amount: body.total_amount || 85.70,
+          id: `exp_mock_${Date.now()}`,
+          group_id: body.group_id,
+          total_amount: body.total_amount,
           currency: body.currency || 'USD',
           created_at: new Date().toISOString(),
         };
@@ -425,7 +424,7 @@ class ApiClient {
             .substring(2, 10)
             .toUpperCase()}`,
           status: 'order_created',
-          amount: 25.00,
+          amount: 25.0,
           currency: 'USD',
         };
       }
@@ -439,7 +438,7 @@ class ApiClient {
             .substring(2, 10)
             .toUpperCase()}`,
           status: 'captured',
-          amount: 25.00,
+          amount: 25.0,
           currency: 'USD',
         };
       }

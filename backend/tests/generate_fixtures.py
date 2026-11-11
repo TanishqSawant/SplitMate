@@ -187,30 +187,6 @@ def generate_fixtures():
     img_05.save(pdf_path, "PDF", resolution=150.0)
     print("Created receipt_05_digital_invoice.pdf")
 
-    # -------------------------------------------------------------------------
-    # 6. FreshMart Grocery Receipt (Real grocery items, tax & subtotal)
-    # -------------------------------------------------------------------------
-    lines_06 = [
-        ("title", "FreshMart"),
-        ("center", "Date: 05/15/2025   Receipt #: FM-24501"),
-        ("divider", ""),
-        ("item", "Organic Bananas|$ 1.29"),
-        ("item", "Whole Milk (1 gal)|$ 4.49"),
-        ("item", "Bread|$ 2.99"),
-        ("item", "Greek Yogurt|$ 1.99"),
-        ("item", "Mixed Berries|$ 3.99"),
-        ("divider", ""),
-        ("item", "Subtotal|$ 14.65"),
-        ("item", "Sales Tax|$ 1.17"),
-        ("divider", ""),
-        ("total", "TOTAL|$ 15.82"),
-        ("center", "Thank you for shopping at FreshMart!"),
-    ]
-    img_06 = create_receipt_image(lines_06)
-    img_06.save(FIXTURES_DIR / "receipt_freshmart_grocery.png")
-    print("Created receipt_freshmart_grocery.png")
-
-
 if __name__ == "__main__":
     generate_fixtures()
 

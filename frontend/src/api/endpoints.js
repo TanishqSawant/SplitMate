@@ -1,21 +1,22 @@
-
 /**
- * SplitMate API Contract & Endpoints
+ * Centralized API Endpoint Definitions for SplitMate
  *
- * Production REST API contracts for FastAPI backend,
- * AI receipt extraction, and PayPal Sandbox.
+ * All frontend requests route through these canonical paths.
+ * Paths are relative to BASE_URL (http://127.0.0.1:8000/api).
  */
 
 export const API_ENDPOINTS = {
-  // Backend Health & System Status
+  // System Health
   HEALTH: '/health',
 
-  // Authentication & User Profile
+  // Authentication & Users
   AUTH: {
-    LOGIN: '/auth/login',
     REGISTER: '/auth/register',
+    LOGIN: '/auth/login',
+    ME: '/auth/me',
     CURRENT_USER: '/auth/me',
     UPDATE_PROFILE: '/auth/profile',
+    LOGOUT: '/auth/logout',
   },
 
   // Groups & Members
@@ -25,6 +26,7 @@ export const API_ENDPOINTS = {
     DETAILS: (groupId) => `/groups/${groupId}`,
     ADD_MEMBER: (groupId) => `/groups/${groupId}/members`,
     MEMBERS: (groupId) => `/groups/${groupId}/members`,
+    BALANCES: (groupId) => `/groups/${groupId}/balances`,
   },
 
   // Expense Management
@@ -37,43 +39,44 @@ export const API_ENDPOINTS = {
     SPLITS: (expenseId) => `/expenses/${expenseId}/splits`,
     INITIALIZE_PAYMENTS: (expenseId) =>
       `/expenses/${expenseId}/initialize-payments`,
+    DELETE: (expenseId) => `/expenses/${expenseId}`,
+    SETTLE: '/expenses/settle',
   },
 
   // AI Receipt Extraction & Review
   RECEIPTS: {
     UPLOAD: '/receipts/upload',
-
-    // Retrieve receipt details and poll extraction status.
+    EXTRACT: (receiptId) => `/receipts/${receiptId}/extract`,
     DETAILS: (receiptId) => `/receipts/${receiptId}`,
     GET: (receiptId) => `/receipts/${receiptId}`,
-
-    // Trigger extraction and retrieve the uploaded image.
-    EXTRACT: (receiptId) => `/receipts/${receiptId}/extract`,
+    REVIEW: (receiptId) => `/receipts/${receiptId}/review`,
     IMAGE: (receiptId) => `/receipts/${receiptId}/image`,
-
-    // Update extracted receipt items.
     UPDATE_ITEMS: (receiptId) => `/receipts/${receiptId}/items`,
-
-    // Internal backend extraction submission contract.
     SUBMIT_EXTRACTION: (receiptId) =>
       `/receipts/${receiptId}/extraction`,
+    SAMPLE_RECEIPTS: '/receipts/samples',
   },
 
   // PayPal Sandbox Integration
   PAYMENTS: {
-    DETAILS: (paymentId) => `/payments/${paymentId}`,
     CREATE_ORDER: (paymentId) =>
       `/payments/${paymentId}/create-order`,
+    CAPTURE: (paymentId) =>
+      `/payments/${paymentId}/capture`,
     CAPTURE_ORDER: (paymentId) =>
       `/payments/${paymentId}/capture`,
+    DETAILS: (paymentId) => `/payments/${paymentId}`,
+    GET: (paymentId) => `/payments/${paymentId}`,
+    HISTORY: '/payments/history',
     LIST_BY_EXPENSE: (expenseId) =>
       `/payments/expense/${expenseId}`,
+    PAYPAL_CREATE_DIRECT: '/payments/paypal/create-order',
+    PAYPAL_CAPTURE_DIRECT: '/payments/paypal/capture-order',
   },
 
   // Analytics & Insights
   ANALYTICS: {
     SUMMARY: '/analytics/summary',
     CATEGORIES: '/analytics/categories',
-    DEBT_GRAPH: '/analytics/debt-simplification',
   },
 };

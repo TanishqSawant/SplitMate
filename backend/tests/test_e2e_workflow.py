@@ -19,7 +19,7 @@ from decimal import Decimal
 import io
 import pytest
 
-from tests.conftest import VALID_JPEG_BYTES
+from tests.conftest import VALID_JPEG_BYTES, DEFAULT_TEST_USER_EMAIL
 
 
 def test_complete_e2e_expense_splitting_and_paypal_lifecycle(client):
@@ -65,7 +65,7 @@ def test_complete_e2e_expense_splitting_and_paypal_lifecycle(client):
     # -------------------------------------------------------------------------
     # Sunil (payer/admin), Dhruv, Pawan, Tanishq, Tanay
     members = [
-        {"name": "Sunil", "email": "sunil@splitmate.io"},
+        {"name": "Sunil", "email": DEFAULT_TEST_USER_EMAIL},
         {"name": "Dhruv", "email": "dhruv@splitmate.io"},
         {"name": "Pawan", "email": "pawan@splitmate.io"},
     ]
@@ -88,7 +88,7 @@ def test_complete_e2e_expense_splitting_and_paypal_lifecycle(client):
     )
     assert res_upload.status_code == 201, res_upload.text
     receipt_data = res_upload.json()
-    receipt_id = receipt_data["id"]
+    receipt_id = receipt_data["receipt_id"]
     assert receipt_data["extraction_status"] == "pending"
 
     # -------------------------------------------------------------------------
@@ -204,9 +204,9 @@ def test_complete_e2e_expense_splitting_and_paypal_lifecycle(client):
         assert p["status"] == "pending"
         assert Decimal(str(p["amount"])) > Decimal("0.00")
 
-    # Pick Dhruv's payment record to settle via PayPal
-    dhruv_payment = next(p for p in payments_list if p["member_id"] == member_ids["Dhruv"])
-    payment_id = dhruv_payment["id"]
+    # Pick Sunil's payment record to settle via PayPal
+    sunil_payment = next(p for p in payments_list if p["member_id"] == member_ids["Sunil"])
+    payment_id = sunil_payment["id"]
 
     # -------------------------------------------------------------------------
     # Step 10: Create PayPal Order (POST /api/payments/{payment_id}/create-order)
@@ -262,9 +262,9 @@ def test_complete_e2e_expense_splitting_and_paypal_lifecycle(client):
     assert res_expense_payments.status_code == 200, res_expense_payments.text
     all_expense_payments = res_expense_payments.json()
     assert len(all_expense_payments) == 3
-    # Check that Dhruv's payment is captured while others remain pending
-    dhruv_checked = next(p for p in all_expense_payments if p["id"] == payment_id)
-    assert dhruv_checked["status"] == "captured"
+    # Check that Sunil's payment is captured while others remain pending
+    sunil_checked = next(p for p in all_expense_payments if p["id"] == payment_id)
+    assert sunil_checked["status"] == "captured"
 
     # -------------------------------------------------------------------------
     # Step 13: Data Persistence Check (Simulate Backend Restart / Reconnect)

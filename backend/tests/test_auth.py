@@ -1,134 +1,239 @@
-"""Tests for User Authentication, Registration, Login, and Session Protection."""
+"""Tests for user authentication: registration, login, JWT validation, and token expiration."""
 
-import pytest
-from app.models.models import User
+from datetime import timedelta
+
+from app.core.security import create_access_token
 
 
-def test_user_registration_success(client):
-    """Test successful user registration returns HTTP 201 and access token."""
-    payload = {
-        "name": "Dhruv Patil",
-        "email": "dhruv.test@splitmate.io",
-        "password": "securepassword123",
-        "paypal_email": "dhruv-sandbox@paypal.com",
-    }
-    resp = client.post("/api/auth/register", json=payload)
+def test_register_success(unauth_client):
+    """Successful registration returns 201 with access token and user info (without password hash)."""
+    resp = unauth_client.post(
+        "/api/auth/register",
+        json={
+            "name": "New User",
+            "email": "newuser@example.com",
+            "password": "SecurePassword123!",
+        },
+    )
     assert resp.status_code == 201
     data = resp.json()
     assert "access_token" in data
     assert data["token_type"] == "bearer"
-    assert data["user"]["email"] == "dhruv.test@splitmate.io"
-    assert data["user"]["name"] == "Dhruv Patil"
-    assert data["user"]["paypal_email"] == "dhruv-sandbox@paypal.com"
-    assert "hashed_password" not in data["user"]
+    assert data["user"]["name"] == "New User"
+    assert data["user"]["email"] == "newuser@example.com"
+    assert "password_hash" not in data["user"]
+    assert "password" not in data["user"]
 
 
-def test_user_registration_duplicate_email_rejected(client):
-    """Test registering with an existing email returns HTTP 400."""
+def test_register_duplicate_email(unauth_client):
+    """Attempting to register with an existing email returns 400 Bad Request."""
     payload = {
-        "name": "Tanishq Duplicate",
-        "email": "tanishq.dup@splitmate.io",
-        "password": "password123",
+        "name": "First User",
+        "email": "duplicate@example.com",
+        "password": "Password123!",
     }
-    resp1 = client.post("/api/auth/register", json=payload)
-    assert resp1.status_code == 201
+    r1 = unauth_client.post("/api/auth/register", json=payload)
+    assert r1.status_code == 201
 
-    resp2 = client.post("/api/auth/register", json=payload)
-    assert resp2.status_code == 400
-    assert "already registered" in resp2.json()["detail"].lower()
+    r2 = unauth_client.post("/api/auth/register", json=payload)
+    assert r2.status_code == 400
+    assert "already registered" in r2.json()["detail"].lower()
 
 
-def test_user_registration_validation_errors(client):
-    """Test invalid registration payload returns 422."""
-    # Invalid email
-    resp = client.post("/api/auth/register", json={
-        "name": "Invalid",
-        "email": "not-an-email",
-        "password": "password123",
-    })
-    assert resp.status_code == 422
-
-    # Password too short (< 6 chars)
-    resp = client.post("/api/auth/register", json={
-        "name": "Short Pass",
-        "email": "short@splitmate.io",
-        "password": "123",
-    })
+def test_register_invalid_email(unauth_client):
+    """Invalid email format is rejected with 422 Unprocessable Entity."""
+    resp = unauth_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Bad Email User",
+            "email": "not-an-email",
+            "password": "Password123!",
+        },
+    )
     assert resp.status_code == 422
 
 
-def test_user_login_success(client):
-    """Test successful login with correct credentials returns token and user."""
-    reg_payload = {
-        "name": "Pawan AI",
-        "email": "pawan.login@splitmate.io",
-        "password": "pawanpassword123",
-    }
-    client.post("/api/auth/register", json=reg_payload)
-
-    login_resp = client.post("/api/auth/login", json={
-        "email": "pawan.login@splitmate.io",
-        "password": "pawanpassword123",
-    })
-    assert login_resp.status_code == 200
-    data = login_resp.json()
-    assert "access_token" in data
-    assert data["user"]["email"] == "pawan.login@splitmate.io"
+def test_register_short_password(unauth_client):
+    """Password shorter than 8 characters is rejected with 422."""
+    resp = unauth_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Short Pwd",
+            "email": "short@example.com",
+            "password": "short",
+        },
+    )
+    assert resp.status_code == 422
 
 
-def test_user_login_invalid_password(client):
-    """Test login with wrong password returns HTTP 401."""
-    reg_payload = {
-        "name": "Tanay Payments",
-        "email": "tanay.login@splitmate.io",
-        "password": "tanaypassword123",
-    }
-    client.post("/api/auth/register", json=reg_payload)
+def test_login_success(unauth_client):
+    """Valid credentials return 200 with JWT access token."""
+    unauth_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Login User",
+            "email": "login@example.com",
+            "password": "CorrectPassword123!",
+        },
+    )
 
-    login_resp = client.post("/api/auth/login", json={
-        "email": "tanay.login@splitmate.io",
-        "password": "wrongpassword!",
-    })
-    assert login_resp.status_code == 401
-    assert "invalid" in login_resp.json()["detail"].lower()
-
-
-def test_user_login_nonexistent_email(client):
-    """Test login with non-existent email returns HTTP 401."""
-    resp = client.post("/api/auth/login", json={
-        "email": "ghost@splitmate.io",
-        "password": "somepassword",
-    })
-    assert resp.status_code == 401
-
-
-def test_protected_route_me_requires_token(client):
-    """Test accessing /api/auth/me without token returns HTTP 401."""
-    resp = client.get("/api/auth/me")
-    assert resp.status_code == 401
-
-
-def test_protected_route_me_with_valid_token(client):
-    """Test accessing /api/auth/me with valid Bearer token returns profile."""
-    reg_resp = client.post("/api/auth/register", json={
-        "name": "Sunil Lead",
-        "email": "sunil.me@splitmate.io",
-        "password": "sunilpassword123",
-    })
-    token = reg_resp.json()["access_token"]
-
-    resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    resp = unauth_client.post(
+        "/api/auth/login",
+        json={
+            "email": "login@example.com",
+            "password": "CorrectPassword123!",
+        },
+    )
     assert resp.status_code == 200
-    assert resp.json()["name"] == "Sunil Lead"
-    assert resp.json()["email"] == "sunil.me@splitmate.io"
+    data = resp.json()
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
+    assert data["user"]["email"] == "login@example.com"
 
 
-def test_protected_route_me_with_invalid_token(client):
-    """Test accessing /api/auth/me with invalid Bearer token returns HTTP 401."""
-    resp = client.get("/api/auth/me", headers={"Authorization": "Bearer fake_token_value_12345"})
+def test_login_incorrect_password(unauth_client):
+    """Incorrect password returns 401 Unauthorized."""
+    unauth_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Login User",
+            "email": "login_bad_pwd@example.com",
+            "password": "CorrectPassword123!",
+        },
+    )
+
+    resp = unauth_client.post(
+        "/api/auth/login",
+        json={
+            "email": "login_bad_pwd@example.com",
+            "password": "WrongPassword456!",
+        },
+    )
     assert resp.status_code == 401
+    assert "Invalid email or password" in resp.json()["detail"]
 
 
+def test_login_nonexistent_email(unauth_client):
+    """Non-existent email returns 401 Unauthorized without leaking email existence."""
+    resp = unauth_client.post(
+        "/api/auth/login",
+        json={
+            "email": "nobody@example.com",
+            "password": "SomePassword123!",
+        },
+    )
+    assert resp.status_code == 401
+    assert "Invalid email or password" in resp.json()["detail"]
+
+
+def test_me_authenticated(client):
+    """Authenticated user can fetch their own profile from /api/auth/me."""
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["email"] == client.auth_user.email
+    assert data["name"] == client.auth_user.name
+    assert "password_hash" not in data
+
+
+def test_missing_token_returns_401(unauth_client):
+    """Requests to protected endpoints without a token return 401."""
+    resp = unauth_client.get("/api/auth/me")
+    assert resp.status_code == 401
+    assert "WWW-Authenticate" in resp.headers
+
+
+def test_invalid_token_returns_401(unauth_client):
+    """Malformed or tampered JWT returns 401."""
+    resp = unauth_client.get(
+        "/api/auth/me",
+        headers={"Authorization": "Bearer this.is.an.invalid.token"},
+    )
+    assert resp.status_code == 401
+    assert "Could not validate credentials" in resp.json()["detail"]
+
+
+def test_expired_token_returns_401(unauth_client, default_user):
+    """Expired JWT returns 401."""
+    expired_token = create_access_token(
+        {"sub": str(default_user.id), "email": default_user.email},
+        expires_delta=timedelta(minutes=-10),
+    )
+    resp = unauth_client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+    assert resp.status_code == 401
+    assert "expired" in resp.json()["detail"].lower()
+
+
+def test_password_hash_never_exposed(unauth_client):
+    """Verify that password hash is not in any response."""
+    reg = unauth_client.post(
+        "/api/auth/register",
+        json={
+            "name": "Secret User",
+            "email": "secret@example.com",
+            "password": "Password123!",
+        },
+    )
+    assert "password_hash" not in reg.text
+    token = reg.json()["access_token"]
+
+    login = unauth_client.post(
+        "/api/auth/login",
+        json={"email": "secret@example.com", "password": "Password123!"},
+    )
+    assert "password_hash" not in login.text
+
+    me = unauth_client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert "password_hash" not in me.text
+
+
+def test_production_rejects_missing_or_insecure_jwt_secret():
+    """In production environment, missing or default JWT secrets must be rejected."""
+    import pytest
+    from app.core.config import Settings
+
+    # Missing / empty secret
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY must be explicitly configured"):
+        Settings(APP_ENV="production", JWT_SECRET_KEY="")
+
+    # Insecure default dev secret
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY must be explicitly configured"):
+        Settings(
+            APP_ENV="production",
+            JWT_SECRET_KEY="dev-insecure-jwt-secret-key-not-for-production",
+        )
+
+    # Secret shorter than 32 characters
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY must be explicitly configured"):
+        Settings(APP_ENV="production", JWT_SECRET_KEY="short-secret-1234")
+
+
+def test_production_accepts_strong_jwt_secret():
+    """In production environment, a strong 32+ character secret is accepted."""
+    from app.core.config import Settings
+
+    strong_secret = "a-very-strong-production-secret-key-that-is-at-least-32-chars!"
+    cfg = Settings(APP_ENV="production", JWT_SECRET_KEY=strong_secret)
+    assert cfg.JWT_SECRET_KEY == strong_secret
+
+
+def test_development_uses_documented_insecure_key(monkeypatch):
+    """In development, a clearly marked dev-only default key is used if unset."""
+    from app.core.config import Settings
+
+    monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+
+    cfg = Settings(
+        APP_ENV="development",
+        _env_file=None,
+    )
+
+    assert cfg.JWT_SECRET_KEY == "dev-insecure-jwt-secret-key-not-for-production"
 def test_update_profile(client):
     """Test updating user profile."""
     reg_resp = client.post("/api/auth/register", json={
@@ -171,7 +276,8 @@ def test_logout_revokes_session(client):
 
 
 def test_password_storage_security(client, db_session):
-    """Verify passwords are never stored in plaintext and use PBKDF2 salt$hash."""
+    """Verify passwords are never stored in plaintext and use cryptographic hashing."""
+    from app.models.models import User
     plain = "mysecretplaintext123"
     client.post("/api/auth/register", json={
         "name": "Crypto Check",
@@ -181,34 +287,8 @@ def test_password_storage_security(client, db_session):
 
     user = db_session.query(User).filter(User.email == "crypto@splitmate.io").first()
     assert user is not None
-    assert plain not in user.hashed_password
-    assert "$" in user.hashed_password
-    salt_hex, key_hex = user.hashed_password.split("$", 1)
-    assert len(salt_hex) == 32  # 16 bytes = 32 hex chars
-    assert len(key_hex) == 64   # SHA-256 = 32 bytes = 64 hex chars
-
-
-def test_jwt_expired_token_rejected_with_401(client, db_session):
-    """Test that a signed JWT with an expiration timestamp in the past is rejected."""
-    from datetime import timedelta
-    from app.core.security import create_access_token
-
-    reg_resp = client.post("/api/auth/register", json={
-        "name": "Expiry User",
-        "email": "expiry.test@splitmate.io",
-        "password": "password123",
-    })
-    user_id = reg_resp.json()["user"]["id"]
-
-    # Generate an expired token (-1 hour)
-    expired_token = create_access_token(
-        data={"sub": user_id, "email": "expiry.test@splitmate.io"},
-        expires_delta=timedelta(hours=-1),
-    )
-
-    resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {expired_token}"})
-    assert resp.status_code == 401
-    assert "expired" in resp.json()["detail"].lower()
+    assert plain not in user.password_hash
+    assert "$" in user.password_hash
 
 
 def test_jwt_tampered_token_rejected_with_401(client, db_session):

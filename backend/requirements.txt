@@ -12,25 +12,26 @@ alembic==1.14.0
 pydantic[email]==2.14.3
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
+
+# Authentication & Security
+bcrypt>=4.0.0
 pyjwt>=2.9.0
 
-# File uploads & storage
+# File uploads & persistent cloud storage
 python-multipart==0.0.17
 boto3>=1.35.0
 
 # AI / receipt scanning
-google-genai==3.0.0
+google-genai>=3.0.0
 pillow>=13.0.0
 numpy>=2.5.0
 pypdfium2>=5.15.0
 rapidocr-onnxruntime>=1.2.3
 opencv-python-headless>=4.8.0
 
-# HTTP client (also used by google-genai)
+# HTTP client (also used by google-genai and PayPal SDK)
 httpx>=0.28.0
 
 # Testing
 pytest==8.3.3
 pytest-asyncio==0.24.0
-
-# CORS is built into FastAPI/Starlette

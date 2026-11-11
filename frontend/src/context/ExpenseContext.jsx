@@ -14,7 +14,8 @@ import confetti from 'canvas-confetti';
 const ExpenseContext = createContext();
 
 export function ExpenseProvider({ children }) {
-  const { currentUser, allUsers } = useAuth();
+  // Merge: keep both allUsers (HEAD) and isAuthenticated (origin/main)
+  const { currentUser, isAuthenticated, allUsers } = useAuth();
   const [groups, setGroups] = useState(MOCK_GROUPS);
   const [expenses, setExpenses] = useState(MOCK_EXPENSES);
   const [transactions, setTransactions] = useState(MOCK_PAYPAL_TRANSACTIONS);
@@ -23,19 +24,21 @@ export function ExpenseProvider({ children }) {
   const [error, setError] = useState(null);
 
   // Active receipt scan session
+  // Merge: HEAD has 'pending' status state; origin/main has extractionStatus, warnings, receiptId fields
   const [receiptScan, setReceiptScan] = useState({
     status: 'idle', // 'idle' | 'uploading' | 'processing' | 'pending' | 'review' | 'error'
     file: null,
     previewUrl: null,
     progress: 0,
-    stage: '',
+    receiptId: null,
+    extractionStatus: null, // 'pending' | 'processing' | 'completed' | 'review_required' | 'failed'
     extractedData: null,
     confidence: null,
+    warnings: null,
     error: null,
-    warnings: [],
-    editedFields: {},
-    receiptId: null,
+    editedFields: {}, // HEAD: tracks edited fields
   });
+
   // Active PayPal settlement modal state
   const [payPalModal, setPayPalModal] = useState({
     isOpen: false,
@@ -51,52 +54,71 @@ export function ExpenseProvider({ children }) {
     error: null,
   });
 
-  // Load groups from backend on mount if available
+  // Merge: origin/main loads on isAuthenticated change; HEAD has initial data load with health check
+  // Keep origin/main's approach (simpler, more reliable) while preserving fallback to mock
   useEffect(() => {
-    let isMounted = true;
-    async function initData() {
-      try {
-        const health = await apiClient.checkHealth();
-        if (health.online && isMounted) {
-          const backendGroups = await apiClient.request(API_ENDPOINTS.GROUPS.LIST);
-          if (Array.isArray(backendGroups) && backendGroups.length > 0) {
-            // Enhance backend groups with members
-            const enhanced = await Promise.all(
-              backendGroups.map(async (g) => {
-                try {
-                  const members = await apiClient.request(API_ENDPOINTS.GROUPS.MEMBERS(g.id));
-                  return {
-                    ...g,
-                    description: g.description || 'SplitMate Squad',
-                    category: g.category || 'Dining & Trip',
-                    currency: g.currency || 'USD',
-                    members: members.map((m) => ({
-                      userId: m.id,
-                      name: m.name,
-                      email: m.email,
-                      role: 'Member',
-                    })),
-                  };
-                } catch {
-                  return g;
-                }
-              })
-            );
-            if (isMounted) {
-              setGroups(enhanced);
-              if (enhanced[0]) setActiveGroup(enhanced[0]);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('Initial backend sync skipped; using local state.', err);
-      }
+    if (isAuthenticated && currentUser) {
+      loadGroupsAndExpenses();
     }
-    initData();
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+  }, [isAuthenticated, currentUser]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load groups and expenses from backend (origin/main)
+  const loadGroupsAndExpenses = async () => {
+    try {
+      setLoading(true);
+
+      // Load groups with members
+      const groupsResponse = await apiClient.request(API_ENDPOINTS.GROUPS.LIST);
+
+      // Load members for each group
+      const groupsWithMembers = await Promise.all(
+        groupsResponse.map(async (group) => {
+          try {
+            const members = await apiClient.request(API_ENDPOINTS.GROUPS.MEMBERS(group.id));
+            return { ...group, members };
+          } catch (err) {
+            console.error(`[SplitMate] Failed to load members for group ${group.id}:`, err);
+            return { ...group, members: [] };
+          }
+        })
+      );
+
+      setGroups(groupsWithMembers);
+      if (groupsWithMembers.length > 0 && !activeGroup) {
+        setActiveGroup(groupsWithMembers[0]);
+      }
+
+      // Load expenses
+      const expensesResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.LIST);
+      setExpenses(expensesResponse);
+
+    } catch (err) {
+      console.error('[SplitMate] Failed to load groups and expenses:', err);
+      // Fall back to mock data on error
+      setGroups(MOCK_GROUPS);
+      setExpenses(MOCK_EXPENSES);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load expenses for the active group from backend
+  const loadGroupExpenses = async (groupId) => {
+    if (!groupId) return;
+
+    try {
+      setLoading(true);
+      const expensesResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.LIST);
+      // Filter by group on client side
+      const groupExpenses = expensesResponse.filter(exp => exp.group_id === groupId);
+      setExpenses(groupExpenses);
+    } catch (err) {
+      console.error('[SplitMate] Failed to load group expenses:', err);
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Calculate user's overall financial summary
   const summary = useMemo(() => {
@@ -167,8 +189,9 @@ export function ExpenseProvider({ children }) {
       const amt = data.amount;
       if (amt <= 0.01) return;
       const [debtorId, creditorId] = key.split('->');
-      const debtor = allUsers.find((u) => u.id === debtorId) || MOCK_USERS.find((u) => u.id === debtorId) || { id: debtorId, name: 'User' };
-      const creditor = allUsers.find((u) => u.id === creditorId) || MOCK_USERS.find((u) => u.id === creditorId) || { id: creditorId, name: 'User' };
+      const safeAllUsers = Array.isArray(allUsers) ? allUsers : [];
+      const debtor = safeAllUsers.find((u) => u.id === debtorId) || MOCK_USERS.find((u) => u.id === debtorId) || { id: debtorId, name: 'User' };
+      const creditor = safeAllUsers.find((u) => u.id === creditorId) || MOCK_USERS.find((u) => u.id === creditorId) || { id: creditorId, name: 'User' };
 
       result.push({
         id: key,
@@ -197,11 +220,12 @@ export function ExpenseProvider({ children }) {
       const newGroupId = response.id;
 
       // 2. Add members to group on backend
-      const memberIds = groupData.memberIds || allUsers.map((u) => u.id);
+      const safeAllUsers = Array.isArray(allUsers) ? allUsers : [];
+      const memberIds = groupData.memberIds || safeAllUsers.map((u) => u.id);
       const addedMembers = [];
 
       for (const uId of memberIds) {
-        const userObj = allUsers.find((u) => u.id === uId) || MOCK_USERS.find((u) => u.id === uId);
+        const userObj = safeAllUsers.find((u) => u.id === uId) || MOCK_USERS.find((u) => u.id === uId);
         if (userObj) {
           try {
             const added = await apiClient.request(API_ENDPOINTS.GROUPS.ADD_MEMBER(newGroupId), {
@@ -261,7 +285,211 @@ export function ExpenseProvider({ children }) {
     }
   };
 
-  // Reset Receipt Scan State cleanly
+  // Start Receipt Extraction using the real backend contract:
+  //   Step 1: POST /api/receipts/upload  → returns {id, extraction_status: 'PENDING', ...}
+  //   Step 2: Poll GET /api/receipts/{id} until extraction_status === 'COMPLETED'
+  //            (Pawan's AI service calls POST /api/receipts/{id}/extraction when done)
+  //   Step 3: Map completed ReceiptResponse into extractedData state
+  const processReceiptFile = async (file) => {
+    const previewUrl = URL.createObjectURL(file);
+    setReceiptScan({
+      status: 'uploading',
+      file,
+      previewUrl,
+      progress: 15,
+      receiptId: null,
+      extractionStatus: 'pending',
+      extractedData: null,
+      confidence: null,
+      warnings: null,
+      error: null,
+      editedFields: {},
+    });
+
+    try {
+      // Step 1: Upload using multipart field name 'file' required by FastAPI
+      const formData = new FormData();
+      formData.append('file', file);
+
+      // Call POST /api/receipts/extract which returns HTTP 202 with receipt_id & extraction_status
+      const initResponse = await apiClient.request(API_ENDPOINTS.RECEIPTS.EXTRACT, {
+        method: 'POST',
+        body: formData,
+        isFormData: true,
+      });
+
+      const receiptId = initResponse.receipt_id;
+      const initialStatus = initResponse.extraction_status || 'pending';
+
+      setReceiptScan((prev) => ({
+        ...prev,
+        status: 'processing',
+        receiptId,
+        extractionStatus: initialStatus,
+        progress: 30,
+      }));
+
+      // Step 2: Poll GET /api/receipts/{receipt_id} until completed, review_required, or failed
+      const MAX_POLL_ATTEMPTS = 35; // ~60 seconds max
+      const POLL_INTERVAL_MS = 1800;
+      let pollCount = 0;
+      let finalResult = null;
+
+      while (pollCount < MAX_POLL_ATTEMPTS) {
+        pollCount++;
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+
+        let res;
+        try {
+          res = await apiClient.request(API_ENDPOINTS.RECEIPTS.DETAILS(receiptId));
+        } catch (pollErr) {
+          console.warn(`[SplitMate] Receipt poll attempt ${pollCount} failed:`, pollErr);
+          if (pollCount >= MAX_POLL_ATTEMPTS) {
+            throw pollErr;
+          }
+          continue;
+        }
+
+        const currentStatus = res.extraction_status;
+
+        // Keep updating progress while pending or processing
+        setReceiptScan((prev) => ({
+          ...prev,
+          receiptId,
+          extractionStatus: currentStatus,
+          progress: Math.min(92, 30 + Math.floor((pollCount / MAX_POLL_ATTEMPTS) * 60)),
+        }));
+
+        if (currentStatus === 'completed' || currentStatus === 'review_required') {
+          finalResult = res;
+          break;
+        } else if (currentStatus === 'failed') {
+          throw new Error(res.error_message || res.error_code || 'Receipt extraction failed. Please try a clearer receipt image.');
+        }
+        // If pending or processing, continue polling without treating as error
+      }
+
+      if (!finalResult) {
+        throw new Error('Receipt extraction timed out while waiting for AI analysis. Please try again.');
+      }
+
+      // Step 3: Map line items preserving null values (do not fabricate defaults)
+      const defaultMembers = activeGroup?.members?.map((m) => m.userId) || [currentUser?.id].filter(Boolean);
+      const itemsWithAssignments = (finalResult.items || []).map((item) => ({
+        id: item.id,
+        name: item.item_name || 'Item',
+        quantity: item.quantity != null ? Number(item.quantity) : null,
+        unit_price: item.unit_price != null ? Number(item.unit_price) : null,
+        price: item.total_price != null ? Number(item.total_price) : null,
+        assignedTo: [...defaultMembers],
+      }));
+
+      const extractedData = {
+        receiptId: finalResult.receipt_id,
+        merchant: finalResult.merchant_name != null ? finalResult.merchant_name : null,
+        currency: finalResult.currency != null ? finalResult.currency : null,
+        subtotal: finalResult.subtotal != null ? Number(finalResult.subtotal) : null,
+        tax: finalResult.tax != null ? Number(finalResult.tax) : null,
+        tip: null,
+        total: finalResult.total != null ? Number(finalResult.total) : null,
+        confidence: finalResult.confidence != null ? finalResult.confidence : null,
+        warnings: finalResult.warnings || null,
+        missingFields: finalResult.missing_fields || null,
+        uncertainFields: finalResult.uncertain_fields || null,
+        extractionStatus: finalResult.extraction_status,
+        isUserReviewed: finalResult.is_user_reviewed || false,
+        items: itemsWithAssignments,
+      };
+
+      setReceiptScan({
+        status: 'review',
+        file,
+        previewUrl,
+        progress: 100,
+        receiptId: finalResult.receipt_id,
+        extractionStatus: finalResult.extraction_status,
+        extractedData,
+        confidence: finalResult.confidence != null ? finalResult.confidence : null,
+        warnings: finalResult.warnings || null,
+        error: null,
+        editedFields: {},
+      });
+    } catch (err) {
+      console.error('[SplitMate] Receipt extraction failed:', err);
+      setReceiptScan((prev) => ({
+        ...prev,
+        status: 'error',
+        error: err.message || 'AI extraction failed. Please try a clearer receipt image.',
+      }));
+    }
+  };
+
+  // Submit human-reviewed corrections for a receipt in review_required status (origin/main)
+  const submitReceiptReview = async (customData) => {
+    if (!receiptScan.receiptId || !receiptScan.extractedData) return;
+    const current = customData || receiptScan.extractedData;
+
+    const currency = (current.currency || '').trim().toUpperCase();
+    if (!currency || currency.length !== 3) {
+      throw new Error("Valid 3-letter currency code (e.g. USD, EUR, INR) is required for review.");
+    }
+    if (current.total == null || isNaN(Number(current.total)) || Number(current.total) <= 0) {
+      throw new Error("A positive total is required for review.");
+    }
+    if (!current.items || current.items.length === 0) {
+      throw new Error("At least one line item is required for review.");
+    }
+
+    const payload = {
+      merchant_name: current.merchant || null,
+      currency,
+      subtotal: current.subtotal != null ? Number(current.subtotal) : null,
+      tax: current.tax != null ? Number(current.tax) : null,
+      total: Number(current.total),
+      items: current.items.map((it, idx) => {
+        const qty = it.quantity != null && Number(it.quantity) > 0 ? Number(it.quantity) : 1;
+        const tot = it.price != null && Number(it.price) >= 0 ? Number(it.price) : 0;
+        let unit = it.unit_price != null && Number(it.unit_price) >= 0 ? Number(it.unit_price) : 0;
+        if (Math.abs(qty * unit - tot) > 0.009) {
+          unit = Number((tot / qty).toFixed(2));
+        }
+        return {
+          item_name: it.name || `Item ${idx + 1}`,
+          quantity: qty,
+          unit_price: unit,
+          total_price: Number((qty * unit).toFixed(2)),
+        };
+      }),
+    };
+
+    const res = await apiClient.request(API_ENDPOINTS.RECEIPTS.REVIEW(receiptScan.receiptId), {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+
+    setReceiptScan((prev) => {
+      if (!prev.extractedData) return prev;
+      return {
+        ...prev,
+        extractionStatus: res.extraction_status,
+        warnings: res.warnings || null,
+        extractedData: {
+          ...prev.extractedData,
+          merchant: res.merchant_name,
+          currency: res.currency,
+          subtotal: res.subtotal != null ? Number(res.subtotal) : null,
+          tax: res.tax != null ? Number(res.tax) : null,
+          total: res.total != null ? Number(res.total) : null,
+          extractionStatus: res.extraction_status,
+          isUserReviewed: res.is_user_reviewed,
+        },
+      };
+    });
+
+    return res;
+  };
+
+  // Reset Receipt Scan State cleanly (HEAD version — revokes blob URL)
   const resetReceiptScan = () => {
     if (receiptScan.previewUrl && receiptScan.previewUrl.startsWith('blob:')) {
       try {
@@ -275,305 +503,17 @@ export function ExpenseProvider({ children }) {
       file: null,
       previewUrl: null,
       progress: 0,
-      stage: '',
-      extractedData: null,
-      confidence: null,
-      error: null,
-      warnings: [],
-      editedFields: {},
       receiptId: null,
-    });
-  };
-
-  // Start Receipt Extraction using the real backend contract:
-  //   Step 1: POST /api/receipts/upload  → returns {id, extraction_status: 'PENDING', ...}
-  //   Step 2: Poll GET /api/receipts/{id} until extraction_status === 'COMPLETED'
-  //            (Pawan's AI service calls POST /api/receipts/{id}/extraction when done)
-  //   Step 3: Map completed ReceiptResponse into extractedData state
-  const processReceiptFile = async (file) => {
-    // 1. Prevent duplicate concurrent submissions
-    if (receiptScan.status === 'uploading' || receiptScan.status === 'processing') {
-      return;
-    }
-
-    // 2. Validate file existence and format
-    if (!file) return;
-
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
-    const fileName = file.name || '';
-    const fileExt = fileName.substring(fileName.lastIndexOf('.')).toLowerCase();
-    const isAllowedExt = allowedExtensions.includes(fileExt);
-    const isAllowedMime = file.type?.startsWith('image/') || file.type === 'application/pdf';
-
-    if (!isAllowedExt && !isAllowedMime) {
-      setReceiptScan({
-        status: 'error',
-        file: null,
-        previewUrl: null,
-        progress: 0,
-        stage: '',
-        extractedData: null,
-        confidence: null,
-        error: "File format not supported. Please upload a JPG, JPEG, PNG, WEBP, or PDF receipt.",
-        warnings: [],
-        editedFields: {},
-      });
-      return;
-    }
-
-    // 3. Validate size bound (10 MB maximum, matching backend config)
-    const MAX_SIZE_BYTES = 10 * 1024 * 1024;
-    if (file.size > MAX_SIZE_BYTES) {
-      setReceiptScan({
-        status: 'error',
-        file: null,
-        previewUrl: null,
-        progress: 0,
-        stage: '',
-        extractedData: null,
-        confidence: null,
-        error: `File size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds the 10 MB limit. Please upload a smaller image.`,
-        warnings: [],
-        editedFields: {},
-      });
-      return;
-    }
-
-    // 4. Clean previous session and allocate object URL
-    if (receiptScan.previewUrl && receiptScan.previewUrl.startsWith('blob:')) {
-      try {
-        URL.revokeObjectURL(receiptScan.previewUrl);
-      } catch {
-        // ignore revoke error
-      }
-    }
-    const previewUrl = URL.createObjectURL(file);
-
-    // --- STEP 1: Upload ---
-    setReceiptScan({
-      status: 'uploading',
-      file,
-      previewUrl,
-      progress: 15,
-      stage: 'Uploading receipt to server...',
+      extractionStatus: null,
       extractedData: null,
       confidence: null,
+      warnings: null,
       error: null,
-      warnings: [],
       editedFields: {},
     });
-
-    try {
-      // Build strictly compliant FormData — do NOT set Content-Type manually
-      const formData = new FormData();
-      formData.append('file', file);
-
-      // POST /api/receipts/upload returns {id, extraction_status: 'PENDING', ...}
-      const uploadResponse = await apiClient.request(API_ENDPOINTS.RECEIPTS.UPLOAD, {
-        method: 'POST',
-        body: formData,
-        isFormData: true,
-        timeout: 15000, // 15s for file upload
-      });
-
-      if (!uploadResponse || !uploadResponse.id) {
-        throw new Error("Receipt upload failed. The server did not return a receipt ID.");
-      }
-
-      const receiptId = uploadResponse.id;
-
-      // --- STEP 2: Poll for extraction completion ---
-      setReceiptScan((prev) => ({
-        ...prev,
-        status: 'processing',
-        progress: 35,
-        stage: 'Analyzing your receipt...',
-      }));
-
-      const POLL_INTERVAL_MS = 2000;
-      const MAX_POLL_ATTEMPTS = 30; // 30 × 2s = 60s max wait
-      const STAGE_LABELS = [
-        { threshold: 40, label: 'Analyzing your receipt...' },
-        { threshold: 55, label: 'Extracting merchant details...' },
-        { threshold: 70, label: 'Identifying individual items...' },
-        { threshold: 85, label: 'Calculating taxes and totals...' },
-        { threshold: 95, label: 'Finalizing extraction results...' },
-      ];
-
-      let pollAttempt = 0;
-      let receiptData = null;
-
-      while (pollAttempt < MAX_POLL_ATTEMPTS) {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        pollAttempt++;
-
-        // Calculate smooth progress: 35% → 95% across max attempts
-        const rawProgress = 35 + Math.round((pollAttempt / MAX_POLL_ATTEMPTS) * 60);
-        const cappedProgress = Math.min(rawProgress, 95);
-        const stageLabel = STAGE_LABELS.findLast?.((s) => cappedProgress >= s.threshold)?.label
-          ?? STAGE_LABELS[Math.min(pollAttempt - 1, STAGE_LABELS.length - 1)].label;
-
-        setReceiptScan((prev) => ({
-          ...prev,
-          progress: cappedProgress,
-          stage: stageLabel,
-        }));
-
-        // GET /api/receipts/{id}
-        let pollData;
-        try {
-          pollData = await apiClient.request(API_ENDPOINTS.RECEIPTS.GET(receiptId), {
-            method: 'GET',
-            timeout: 8000,
-          });
-        } catch {
-          // Network error during poll — propagate
-          throw new Error(`Unable to connect to the receipt extraction service.`);
-        }
-
-        if (pollData.extraction_status === 'COMPLETED') {
-          receiptData = pollData;
-          break;
-        }
-
-        if (pollData.extraction_status === 'FAILED') {
-          throw new Error("Receipt extraction failed. Please try again.");
-        }
-
-        // Still PENDING — continue polling
-      }
-
-      if (!receiptData) {
-        // Timed out — AI service may still be processing
-        setReceiptScan((prev) => ({
-          ...prev,
-          status: 'pending',
-          progress: 95,
-          stage: 'AI extraction is still processing...',
-          receiptId,
-        }));
-        return;
-      }
-
-      // --- STEP 3: Map ReceiptResponse into frontend extractedData ---
-      // Backend ReceiptResponse: { id, merchant_name, currency, subtotal, tax, total, extraction_status, items[] }
-      // items[]: { id, receipt_id, item_name, quantity, unit_price, total_price }
-
-      const rawItems = Array.isArray(receiptData.items) ? receiptData.items : [];
-      const formattedItems = rawItems.map((item, idx) => ({
-        id: item.id || `item_${idx + 1}`,
-        name: item.item_name || 'Unnamed Item',
-        quantity: item.quantity != null ? Number(item.quantity) : 1,
-        price: Number(item.total_price ?? item.unit_price ?? 0),
-        unitPrice: item.unit_price != null ? Number(item.unit_price) : null,
-      }));
-
-      const merchant = receiptData.merchant_name || null;
-      const totalAmount = receiptData.total != null ? Number(receiptData.total) : null;
-      const subtotalVal = receiptData.subtotal != null ? Number(receiptData.subtotal) : null;
-      const taxVal = receiptData.tax != null ? Number(receiptData.tax) : null;
-
-      // Assign items to active group members
-      const defaultMembers = activeGroup?.members?.map((m) => m.userId) || [currentUser?.id].filter(Boolean);
-      const itemsWithAssignments = formattedItems.map((item) => ({
-        ...item,
-        assignedTo: [...defaultMembers],
-      }));
-
-      // Compute finalTotal: use backend total, or derive from subtotal+tax
-      const computedTotal = (subtotalVal || 0) + (taxVal || 0);
-      const finalTotal = totalAmount != null && totalAmount > 0 ? totalAmount : computedTotal;
-
-      // Math consistency warning
-      const warnings = [];
-      if (subtotalVal !== null && taxVal !== null && totalAmount !== null) {
-        const expectedTotal = Number((subtotalVal + taxVal).toFixed(2));
-        if (Math.abs(totalAmount - expectedTotal) > 0.05) {
-          warnings.push(`Mathematical discrepancy: Subtotal ($${subtotalVal.toFixed(2)}) + Tax ($${taxVal.toFixed(2)}) = $${expectedTotal.toFixed(2)}, but receipt total is $${totalAmount.toFixed(2)}. Please verify.`);
-        }
-      }
-
-      setReceiptScan({
-        status: 'review',
-        file,
-        previewUrl,
-        progress: 100,
-        stage: 'Extraction complete',
-        receiptId,
-        extractedData: {
-          merchant,
-          date: null,
-          category: 'General',
-          currency: receiptData.currency || 'USD',
-          subtotal: subtotalVal,
-          tax: taxVal,
-          tip: null,
-          total: finalTotal,
-          items: itemsWithAssignments,
-        },
-        // Confidence not included in ReceiptResponse — Pawan's service tracks it internally
-        confidence: null,
-        warnings,
-        editedFields: {},
-        error: null,
-      });
-
-    } catch (err) {
-      const msg = err.message || '';
-      let userFriendlyError = "Receipt extraction failed. Please try again.";
-
-      if (
-        msg.toLowerCase().includes('unable to connect') ||
-        msg.toLowerCase().includes('unreachable') ||
-        msg.toLowerCase().includes('failed to fetch') ||
-        msg.toLowerCase().includes('network') ||
-        msg.toLowerCase().includes('econnrefused')
-      ) {
-        userFriendlyError = "Unable to connect to the receipt extraction service.";
-      } else if (
-        msg.toLowerCase().includes('not appear to contain') ||
-        msg.toLowerCase().includes('not a receipt') ||
-        msg.toLowerCase().includes('invalid image') ||
-        msg.toLowerCase().includes('400')
-      ) {
-        userFriendlyError = "This image does not appear to contain a valid receipt.";
-      } else if (
-        msg.toLowerCase().includes('blur') ||
-        msg.toLowerCase().includes('quality')
-      ) {
-        userFriendlyError = "We couldn't read this receipt clearly. Please upload a higher-quality image.";
-      } else if (
-        msg.toLowerCase().includes('413') ||
-        msg.toLowerCase().includes('too large')
-      ) {
-        userFriendlyError = "The file is too large. Please upload an image under 10 MB.";
-      } else if (
-        msg.toLowerCase().includes('422') ||
-        msg.toLowerCase().includes('unprocessable')
-      ) {
-        userFriendlyError = "The file could not be processed by the server. Please check the format and try again.";
-      } else if (
-        msg.toLowerCase().includes('500') ||
-        msg.toLowerCase().includes('internal server') ||
-        msg.toLowerCase().includes('json') ||
-        msg.toLowerCase().includes('syntaxerror')
-      ) {
-        userFriendlyError = "Receipt extraction failed. Please try again.";
-      } else if (msg) {
-        userFriendlyError = msg;
-      }
-
-      setReceiptScan((prev) => ({
-        ...prev,
-        status: 'error',
-        error: userFriendlyError,
-        extractedData: null,
-      }));
-    }
   };
 
-
-  // Load Sample Receipt for one-click demo
+  // Load Sample Receipt for one-click demo (HEAD)
   const loadSampleReceipt = (sampleId) => {
     const sample = MOCK_SAMPLE_RECEIPTS.find((s) => s.id === sampleId) || MOCK_SAMPLE_RECEIPTS[0];
     setReceiptScan({
@@ -581,7 +521,8 @@ export function ExpenseProvider({ children }) {
       file: null,
       previewUrl: sample.image,
       progress: 100,
-      stage: 'Loaded demo benchmark sample',
+      receiptId: null,
+      extractionStatus: 'completed',
       extractedData: {
         merchant: sample.merchant,
         date: sample.date,
@@ -595,9 +536,9 @@ export function ExpenseProvider({ children }) {
         items: JSON.parse(JSON.stringify(sample.items)),
       },
       confidence: sample.confidence,
-      warnings: [],
-      editedFields: {},
+      warnings: null,
       error: null,
+      editedFields: {},
     });
   };
 
@@ -621,221 +562,201 @@ export function ExpenseProvider({ children }) {
     });
   };
 
-  // Update item line details (quantity, price, name)
-  const updateExtractedItem = (itemId, updates) => {
-    setReceiptScan((prev) => {
-      if (!prev.extractedData) return prev;
-      const updatedItems = prev.extractedData.items.map((item) => {
-        if (item.id === itemId) {
-          return { ...item, ...updates, isEdited: true };
-        }
-        return item;
-      });
-      const newSubtotal = Number(updatedItems.reduce((sum, it) => sum + (it.price || 0), 0).toFixed(2));
-      const tax = prev.extractedData.tax || 0;
-      const tip = prev.extractedData.tip || 0;
-      const newTotal = Number((newSubtotal + tax + tip).toFixed(2));
-
-      return {
-        ...prev,
-        extractedData: {
-          ...prev.extractedData,
-          items: updatedItems,
-          subtotal: newSubtotal,
-          total: newTotal,
-        },
-        editedFields: {
-          ...prev.editedFields,
-          items: true,
-          subtotal: true,
-          total: true,
-        },
-      };
-    });
-  };
-
   // Update receipt line items or metadata
   const updateReceiptMetadata = (field, value) => {
     setReceiptScan((prev) => {
       if (!prev.extractedData) return prev;
       return {
         ...prev,
+        editedFields: { ...prev.editedFields, [field]: true },
         extractedData: {
           ...prev.extractedData,
           [field]: value,
-        },
-        editedFields: {
-          ...prev.editedFields,
-          [field]: true,
         },
       };
     });
   };
 
+  // Update a single extracted item field (HEAD: updateExtractedItem)
+  const updateExtractedItem = (itemId, field, value) => {
+    setReceiptScan((prev) => {
+      if (!prev.extractedData) return prev;
+      const updatedItems = prev.extractedData.items.map((item) => {
+        if (item.id === itemId) {
+          return { ...item, [field]: value };
+        }
+        return item;
+      });
+      return {
+        ...prev,
+        editedFields: { ...prev.editedFields, [`item_${itemId}_${field}`]: true },
+        extractedData: {
+          ...prev.extractedData,
+          items: updatedItems,
+        },
+      };
+    });
+  };
 
-  // Finalize receipt scan into an expense and initialize payments
+  // Finalize receipt scan into an expense with real backend persistence (origin/main)
   const finalizeReceiptScan = async (targetGroupId, paidByUserId) => {
-    if (!receiptScan.extractedData) return;
+    if (!receiptScan.extractedData || !receiptScan.receiptId) {
+      throw new Error('No receipt data available to finalize');
+    }
+
+    // Gate: Do not allow payment initialization until extraction is completed
+    if (receiptScan.extractionStatus !== 'completed') {
+      throw new Error(
+        `Receipt extraction status is '${receiptScan.extractionStatus}'. Human review must be completed before splitting or initializing payments.`
+      );
+    }
 
     const data = receiptScan.extractedData;
     const targetGroup = groups.find((g) => g.id === targetGroupId) || activeGroup;
-    const groupMemberIds = targetGroup?.members?.map((m) => m.userId || m.id) || [currentUser.id];
 
-    // Compute shares based on item assignments + tax/tip proportional split
-    const userShares = {};
-    groupMemberIds.forEach((id) => (userShares[id] = 0));
-
-    let itemsTotal = 0;
-    data.items.forEach((item) => {
-      itemsTotal += item.price;
-      const assigned = item.assignedTo && item.assignedTo.length > 0 ? item.assignedTo : groupMemberIds;
-      const sharePerUser = item.price / assigned.length;
-      assigned.forEach((uId) => {
-        userShares[uId] = (userShares[uId] || 0) + sharePerUser;
-      });
-    });
-
-    // Pro-rate tax and tip based on items share
-    const extraCharges = (data.tax || 0) + (data.tip || 0);
-    if (extraCharges > 0 && itemsTotal > 0) {
-      groupMemberIds.forEach((uId) => {
-        const userItemRatio = (userShares[uId] || 0) / itemsTotal;
-        userShares[uId] = (userShares[uId] || 0) + extraCharges * userItemRatio;
-      });
+    if (!targetGroup || !targetGroup.members || targetGroup.members.length === 0) {
+      throw new Error('Target group must have at least one member');
     }
 
-    let createdBackendExpense = null;
-    let paymentRecords = [];
+    // Check if expense already exists for this receipt
+    const existingExpense = expenses.find(exp => exp.receipt_id === receiptScan.receiptId || exp.receiptId === receiptScan.receiptId);
+    if (existingExpense) {
+      console.log('[SplitMate] Expense already exists for this receipt:', existingExpense.id);
+      setReceiptScan({
+        status: 'idle',
+        file: null,
+        previewUrl: null,
+        progress: 0,
+        receiptId: null,
+        extractionStatus: null,
+        extractedData: null,
+        confidence: null,
+        warnings: null,
+        error: null,
+        editedFields: {},
+      });
+      confetti({
+        particleCount: 80,
+        spread: 60,
+        origin: { y: 0.6 },
+      });
+      return existingExpense;
+    }
 
-    // Attempt real backend integration: Expense -> Assign -> Splits -> Initialize Payments
-    const isRealUUID = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+    setLoading(true);
+    try {
+      // Step 1: Create expense linked to receipt
+      const expensePayload = {
+        group_id: targetGroupId,
+        receipt_id: receiptScan.receiptId,
+        total_amount: Number(data.total),
+        currency: data.currency || 'USD',
+      };
 
-    if (targetGroupId && isRealUUID(targetGroupId)) {
-      try {
-        // Sync any edited or newly added items to backend receipt first
-        if (isRealUUID(data.receiptId) && data.items && data.items.length > 0) {
-          try {
-            const updatedReceipt = await apiClient.request(
-              API_ENDPOINTS.RECEIPTS.UPDATE_ITEMS(data.receiptId),
-              {
-                method: 'PUT',
-                body: JSON.stringify({
-                  merchant_name: data.merchant,
-                  currency: data.currency || 'USD',
-                  tax: Number(data.tax || 0),
-                  items: data.items.map((it) => ({
-                    item_name: it.name || it.item_name || 'Item',
-                    quantity: it.quantity || 1,
-                    unit_price: Number(it.price || it.unit_price || 0),
-                    total_price: Number(((it.price || it.unit_price || 0) * (it.quantity || 1)).toFixed(2)),
-                  })),
-                }),
-              }
-            );
-            if (updatedReceipt?.items && updatedReceipt.items.length === data.items.length) {
-              data.items.forEach((item, idx) => {
-                item.id = updatedReceipt.items[idx].id;
-              });
-            }
-          } catch (syncErr) {
-            console.warn('Could not sync edited items to backend receipt:', syncErr);
-          }
+      const expenseResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.CREATE, {
+        method: 'POST',
+        body: JSON.stringify(expensePayload),
+      });
+
+      const expenseId = expenseResponse.id;
+
+      // Step 2: Build assignment batch from item assignments
+      // Map frontend user IDs to backend member IDs
+      const userIdToMemberId = {};
+      targetGroup.members.forEach((member) => {
+        const uid = member.userId || member.user_id;
+        if (uid) {
+          userIdToMemberId[uid] = member.id;
+        }
+      });
+
+      // For each receipt item, create assignments for each assigned user
+      const assignments = [];
+      data.items.forEach((item) => {
+        const assignedUserIds = item.assignedTo || [];
+        if (assignedUserIds.length === 0) {
+          throw new Error(`Item "${item.name}" has no assignments`);
         }
 
-        const expensePayload = {
-          group_id: targetGroupId,
-          receipt_id: isRealUUID(data.receiptId) ? data.receiptId : null,
-          total_amount: Number(data.total.toFixed(2)),
-          currency: data.currency || 'USD',
-        };
+        // Calculate share quantity per user (split equally among assigned users)
+        const itemQuantity = item.quantity != null ? Number(item.quantity) : 1;
+        const sharePerUser = itemQuantity / assignedUserIds.length;
 
-        createdBackendExpense = await apiClient.request(API_ENDPOINTS.EXPENSES.CREATE, {
-          method: 'POST',
-          body: JSON.stringify(expensePayload),
-        });
+        assignedUserIds.forEach((userId) => {
+          const memberId = userIdToMemberId[userId];
+          if (!memberId) {
+            throw new Error(`User ${userId} is not a member of the target group`);
+          }
 
-        // Batch assign items on backend if receipt items are UUIDs
-        if (createdBackendExpense && isRealUUID(data.receiptId)) {
-          const assignments = [];
-          data.items.forEach((item) => {
-            if (isRealUUID(item.id)) {
-              const assignedMembers = item.assignedTo || groupMemberIds;
-              const share = 1 / Math.max(1, assignedMembers.length);
-              assignedMembers.forEach((mId) => {
-                if (isRealUUID(mId)) {
-                  assignments.push({
-                    receipt_item_id: item.id,
-                    member_id: mId,
-                    share_quantity: Number(share.toFixed(4)),
-                  });
-                }
-              });
-            }
+          assignments.push({
+            receipt_item_id: item.id,
+            member_id: memberId,
+            share_quantity: Number(sharePerUser.toFixed(4)),
           });
-
-          if (assignments.length > 0) {
-            await apiClient.request(API_ENDPOINTS.EXPENSES.ASSIGN(createdBackendExpense.id), {
-              method: 'POST',
-              body: JSON.stringify({ assignments }),
-            });
-
-            // Initialize pending PayPal payments on backend
-            paymentRecords = await apiClient.request(
-              API_ENDPOINTS.EXPENSES.INITIALIZE_PAYMENTS(createdBackendExpense.id),
-              { method: 'POST' }
-            );
-          }
-        }
-      } catch (err) {
-        console.warn('Backend expense pipeline completed with local fallback:', err);
-      }
-    }
-
-    // Map payment records by member
-    const paymentMapByMember = {};
-    if (Array.isArray(paymentRecords)) {
-      paymentRecords.forEach((p) => {
-        paymentMapByMember[p.member_id] = p.id;
+        });
       });
+
+      // Step 3: Submit assignments to backend
+      await apiClient.request(API_ENDPOINTS.EXPENSES.ASSIGN(expenseId), {
+        method: 'POST',
+        body: JSON.stringify({ assignments }),
+      });
+
+      // Step 4: Fetch calculated splits from backend
+      const splitsResponse = await apiClient.request(API_ENDPOINTS.EXPENSES.SPLITS(expenseId));
+
+      // Step 5: Initialize payments
+      const paymentsResponse = await apiClient.request(
+        API_ENDPOINTS.EXPENSES.INITIALIZE_PAYMENTS(expenseId),
+        {
+          method: 'POST',
+        }
+      );
+
+      // Step 6: Update local state with backend response
+      const newExpense = {
+        id: expenseResponse.id,
+        groupId: expenseResponse.group_id,
+        receiptId: expenseResponse.receipt_id,
+        receipt_id: expenseResponse.receipt_id,
+        description: `${data.merchant || 'Receipt'} (AI Receipt Split)`,
+        amount: expenseResponse.total_amount,
+        currency: expenseResponse.currency,
+        date: new Date(expenseResponse.created_at).toISOString().split('T')[0],
+        paidBy: paidByUserId,
+        splitType: 'ITEMIZED',
+        splitDetails: splitsResponse.splits.map((split) => ({
+          userId: split.member_id,
+          userName: split.member_name,
+          userEmail: split.member_email,
+          share: Number(split.amount),
+          isPaid: false,
+        })),
+        payments: paymentsResponse,
+      };
+
+      setExpenses((prev) => [newExpense, ...prev]);
+
+      // Reset scan state cleanly
+      resetReceiptScan();
+
+      confetti({
+        particleCount: 120,
+        spread: 80,
+        origin: { y: 0.6 },
+      });
+
+      return newExpense;
+    } catch (err) {
+      console.error('[SplitMate] Expense finalization failed:', err);
+      setError(err.message || 'Failed to create expense');
+      throw err;
+    } finally {
+      setLoading(false);
     }
-
-    const splitDetails = groupMemberIds.map((uId) => ({
-      userId: uId,
-      share: Number((userShares[uId] || 0).toFixed(2)),
-      isPaid: uId === paidByUserId,
-      paymentId: paymentMapByMember[uId] || `pay_${Date.now()}_${uId}`,
-    }));
-
-    const newExpense = {
-      id: createdBackendExpense?.id || `exp_${Date.now()}`,
-      groupId: targetGroupId,
-      description: `${data.merchant} (AI Receipt Split)`,
-      amount: data.total,
-      currency: data.currency || 'USD',
-      category: data.category || 'Food & Dining',
-      paidBy: paidByUserId || currentUser.id,
-      date: data.date || new Date().toISOString().split('T')[0],
-      receiptId: data.receiptId || `rcpt_${Date.now()}`,
-      splitType: 'ITEMIZED',
-      splitDetails,
-    };
-
-    setExpenses((prev) => [newExpense, ...prev]);
-
-    // Reset scan state cleanly
-    resetReceiptScan();
-
-    // Fire celebratory confetti
-    confetti({
-      particleCount: 100,
-      spread: 70,
-      origin: { y: 0.6 }
-    });
-
-    return newExpense;
   };
 
-  // Open PayPal Payment Modal
+  // Open PayPal Payment Modal for a debt
   const openPayPalPayment = ({ creditor, debtor, amount, note, groupId, paymentId }) => {
     setPayPalModal({
       isOpen: true,
@@ -856,45 +777,60 @@ export function ExpenseProvider({ children }) {
     setPayPalModal((prev) => ({ ...prev, isOpen: false, status: 'idle', error: null }));
   };
 
-  // Execute PayPal Payment Flow (Tanay's integration)
-  const executePayPalPayment = async () => {
+  // Execute PayPal Payment Flow
+  // Merge: HEAD has resilient mock fallback; origin/main has approval_url support and real capture endpoint
+  const executePayPalPayment = async (paymentId) => {
+    const resolvedPaymentId = paymentId || payPalModal.paymentId;
+
     setPayPalModal((prev) => ({ ...prev, status: 'initiating', error: null }));
 
     try {
       let captureId = null;
       let orderId = null;
+      let captureResponse = null;
 
       const isRealUUID = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 
-      // If we have a backend payment UUID, use the real backend PayPal endpoints
-      if (payPalModal.paymentId && isRealUUID(payPalModal.paymentId)) {
-        // Step 1: Create Order
-        setPayPalModal((prev) => ({ ...prev, status: 'initiating' }));
+      if (resolvedPaymentId && isRealUUID(resolvedPaymentId)) {
+        // Step 1: Create PayPal Order
         const orderResponse = await apiClient.request(
-          API_ENDPOINTS.PAYMENTS.CREATE_ORDER(payPalModal.paymentId),
+          API_ENDPOINTS.PAYMENTS.CREATE_ORDER(resolvedPaymentId),
           {
             method: 'POST',
-            body: JSON.stringify({}),
+            body: JSON.stringify({
+              return_url: window.location.href,
+              cancel_url: window.location.href,
+            }),
           }
         );
 
         orderId = orderResponse.paypal_order_id;
-        setPayPalModal((prev) => ({ ...prev, status: 'authorizing' }));
-        await new Promise((r) => setTimeout(r, 600));
 
-        // Step 2: Capture Payment
+        // If we get an approval URL, open it in a new tab
+        if (orderResponse.approval_url) {
+          window.open(orderResponse.approval_url, '_blank');
+        }
+
+        setPayPalModal((prev) => ({ ...prev, status: 'authorizing' }));
+
+        // Wait for user to complete PayPal checkout
+        await new Promise((r) => setTimeout(r, 1000));
+
+        // Step 2: Capture Order
         setPayPalModal((prev) => ({ ...prev, status: 'capturing' }));
-        const captureResponse = await apiClient.request(
-          API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER(payPalModal.paymentId),
+        captureResponse = await apiClient.request(
+          API_ENDPOINTS.PAYMENTS.CAPTURE(resolvedPaymentId),
           {
             method: 'POST',
-            body: JSON.stringify({ paypal_order_id: orderId }),
+            body: JSON.stringify({
+              paypal_order_id: orderId,
+            }),
           }
         );
 
         captureId = captureResponse.paypal_capture_id || orderId;
       } else {
-        // Resilient sandbox flow for mock debts
+        // Resilient sandbox flow for mock debts (HEAD fallback)
         setPayPalModal((prev) => ({ ...prev, status: 'authorizing' }));
         await new Promise((r) => setTimeout(r, 500));
         orderId = `MOCK-ORD-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
@@ -902,36 +838,42 @@ export function ExpenseProvider({ children }) {
         setPayPalModal((prev) => ({ ...prev, status: 'capturing' }));
         await new Promise((r) => setTimeout(r, 600));
         captureId = `MOCK-CAP-${Math.random().toString(36).substring(2, 10).toUpperCase()}`;
+        captureResponse = {
+          paypal_capture_id: captureId,
+          amount: payPalModal.amount,
+          currency: payPalModal.currency,
+          status: 'COMPLETED',
+        };
       }
 
       // Step 3: Record transaction in state
       const newTxn = {
         id: `txn_pp_${Date.now()}`,
-        orderId: orderId,
-        captureId: captureId,
-        payerId: payPalModal.payer.id,
-        payerName: payPalModal.payer.name,
-        receiverId: payPalModal.receiver.id,
-        receiverName: payPalModal.receiver.name,
-        receiverEmail: payPalModal.receiver.paypalEmail || `${payPalModal.receiver.name.toLowerCase()}@sandbox.paypal.com`,
-        amount: payPalModal.amount,
-        currency: payPalModal.currency,
+        orderId,
+        captureId,
+        payerId: payPalModal.payer?.id,
+        payerName: payPalModal.payer?.name,
+        receiverId: payPalModal.receiver?.id,
+        receiverName: payPalModal.receiver?.name,
+        receiverEmail: payPalModal.receiver?.paypalEmail || `${(payPalModal.receiver?.name || 'user').toLowerCase()}@sandbox.paypal.com`,
+        amount: captureResponse.amount || payPalModal.amount,
+        currency: captureResponse.currency || payPalModal.currency,
         date: new Date().toISOString(),
-        status: 'COMPLETED',
+        status: captureResponse.status || 'COMPLETED',
         note: payPalModal.note,
         method: 'PayPal Sandbox Checkout',
       };
 
       setTransactions((prev) => [newTxn, ...prev]);
 
-      // Mark matching debts as settled in expenses
+      // Mark split as paid
       setExpenses((prevExpenses) =>
         prevExpenses.map((exp) => {
-          if (exp.paidBy === payPalModal.receiver.id) {
+          if (exp.paidBy === payPalModal.receiver?.id) {
             return {
               ...exp,
               splitDetails: (exp.splitDetails || []).map((detail) => {
-                if (detail.userId === payPalModal.payer.id) {
+                if (detail.userId === payPalModal.payer?.id) {
                   return { ...detail, isPaid: true };
                 }
                 return detail;
@@ -948,15 +890,15 @@ export function ExpenseProvider({ children }) {
         transactionId: captureId,
       }));
 
-      // Fire celebratory confetti for the fintech win!
       confetti({
         particleCount: 120,
         spread: 80,
-        origin: { y: 0.6 }
+        origin: { y: 0.6 },
       });
 
       return { success: true, captureId };
     } catch (err) {
+      console.error('[SplitMate] PayPal payment failed:', err);
       setPayPalModal((prev) => ({
         ...prev,
         status: 'error',
@@ -985,7 +927,10 @@ export function ExpenseProvider({ children }) {
         payPalModal,
         createGroup,
         addExpense,
+        loadGroupExpenses,
+        loadGroupsAndExpenses,
         processReceiptFile,
+        submitReceiptReview,
         loadSampleReceipt,
         updateItemAssignment,
         updateExtractedItem,

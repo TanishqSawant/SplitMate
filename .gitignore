@@ -221,6 +221,7 @@ __marimo__/
 
 
 # SplitMate - uploads directory (runtime data)
+uploads/
 backend/uploads/
 
 # SplitMate SQLite Databases
@@ -235,3 +236,12 @@ backend/test.db
 node_modules/
 dist/
 .DS_Store
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor swap files
+*.swp
+*.swo

@@ -27,6 +27,7 @@ from tests.conftest import (
     VALID_WEBP_BYTES,
     VALID_PDF_BYTES,
     TEST_INTERNAL_SERVICE_SECRET,
+    DEFAULT_TEST_USER_EMAIL,
 )
 
 
@@ -281,7 +282,7 @@ class TestPaymentServerSideVerification:
         assert g.status_code == 201, g.text
         group_id = g.json()["id"]
 
-        m1 = client.post(f"/api/groups/{group_id}/members", json={"name": "Payer", "email": "p@test.com"})
+        m1 = client.post(f"/api/groups/{group_id}/members", json={"name": "Payer", "email": DEFAULT_TEST_USER_EMAIL})
         assert m1.status_code == 201, m1.text
         payer_id = m1.json()["id"]
 
@@ -290,7 +291,7 @@ class TestPaymentServerSideVerification:
             files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
         )
         assert upload.status_code == 201, upload.text
-        receipt_id = upload.json()["id"]
+        receipt_id = upload.json()["receipt_id"]
 
         extract = client.post(
             f"/api/receipts/{receipt_id}/extraction",

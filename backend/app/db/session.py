@@ -1,5 +1,7 @@
 """SQLAlchemy engine and session factory."""
 
+from contextlib import contextmanager
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 import sqlite3
@@ -38,6 +40,30 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    finally:
+        db.close()
+
+
+@contextmanager
+def get_db_context():
+    """Context manager for a database session outside of a FastAPI request lifecycle.
+
+    Use this in background tasks or worker threads where FastAPI's dependency
+    injection is unavailable. The caller owns the transaction.
+
+    Example::
+
+        with get_db_context() as db:
+            receipt = db.get(Receipt, receipt_id)
+            ...
+            db.commit()
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 

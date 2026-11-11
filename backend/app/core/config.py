@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from dotenv import load_dotenv
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 # Locate backend/.env reliably regardless of working directory and load into os.environ
@@ -52,12 +53,14 @@ class Settings(BaseSettings):
     # Internal service authentication (used by Pawan's AI extraction service)
     INTERNAL_SERVICE_SECRET: str = ""
 
-    # JWT Authentication (24-hour stateless tokens)
-    JWT_SECRET_KEY: str = "splitmate-jwt-secret-key-change-in-production-2026"
+    # JWT Authentication
+    # In production, JWT_SECRET_KEY must be explicitly set to a strong secret (at least 32 characters).
+    # In development, an explicitly documented dev-only insecure key is used if unset.
+    JWT_SECRET_KEY: str = "dev-insecure-jwt-secret-key-not-for-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
 
-    # Gemini AI
+    # Google Gemini AI Configuration
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-1.5-flash"
 
@@ -66,6 +69,21 @@ class Settings(BaseSettings):
     PAYPAL_CLIENT_SECRET: str = ""
     PAYPAL_BASE_URL: str = "https://api-m.sandbox.paypal.com"
     PAYPAL_MOCK_MODE: bool = False
+    PAYPAL_TIMEOUT_SECONDS: float = 10.0
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        if self.APP_ENV == "production":
+            if (
+                not self.JWT_SECRET_KEY
+                or len(self.JWT_SECRET_KEY) < 32
+                or self.JWT_SECRET_KEY.startswith("dev-insecure")
+            ):
+                raise ValueError(
+                    "JWT_SECRET_KEY must be explicitly configured with a strong, non-default secret "
+                    "(at least 32 characters) in production environment."
+                )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -87,4 +105,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
