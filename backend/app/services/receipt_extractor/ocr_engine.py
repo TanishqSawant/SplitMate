@@ -1,44 +1,49 @@
+
 """OCR and Vision extraction engine abstraction.
 
 Coordinates between:
-1. Gemini Vision multimodal extraction (primary)
-2. Local OCR engines (Tesseract / EasyOCR) if installed on host
-3. Heuristic fallback when offline
+1. Gemini Vision multimodal extraction (primary extraction engine).
+2. Local Tesseract / RapidOCR as supporting preprocessing.
+3. Offline regex fallback when Gemini is unavailable.
 """
 
 import logging
 import os
 import re
 import shutil
-from typing import Any
+
 from PIL import Image
 
 from .schemas import ReceiptExtractionResult
-from .llm_parser import GeminiVisionExtractor, RegexHeuristicFallback
+from .llm_parser import GeminiVisionExtractor
 
 logger = logging.getLogger(__name__)
 
 
 def _split_camel_merged_token(token: str) -> str:
-    """Insert spaces where RapidOCR merged adjacent words into CamelCase.
+    """Insert spaces where RapidOCR merged adjacent CamelCase words.
 
-    For example: ``OrganicBananas`` → ``Organic Bananas``
-                 ``WholeMilk``     → ``Whole Milk``
-    Preserves intentional brand names like ``FreshMart`` or ``PayPal``
-    because a space between them is harmless for the regex parser.
-    Does NOT affect all-caps tokens (e.g., ``TAX``, ``USD``) or tokens
-    that already contain spaces.
+    Example:
+        OrganicBananas -> Organic Bananas
+        WholeMilk -> Whole Milk
+
+    All-uppercase tokens and tokens containing spaces are preserved.
     """
-    # Only process if no space present and the token is not all-uppercase
     if " " in token or token.isupper():
         return token
-    # Insert a space before each uppercase letter that follows a lowercase letter
-    # e.g. "OrganicBananas" → "Organic Bananas"
+
     return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", token)
 
 
 class OCREngine:
-    """Unified OCR and Vision engine for receipt text and layout extraction."""
+    """Unified OCR and Vision engine for receipt extraction.
+
+    Gemini Vision is the primary extraction engine.
+
+    Local OCR is used to provide supporting text context.
+    If Gemini is unavailable, GeminiVisionExtractor uses its
+    configured offline regex fallback.
+    """
 
     def __init__(
         self,
@@ -47,93 +52,133 @@ class OCREngine:
     ):
         self.preferred_engine = preferred_engine
         self.gemini_extractor = GeminiVisionExtractor(api_key=api_key)
-        self.fallback_parser = RegexHeuristicFallback()
 
     @staticmethod
     def is_tesseract_available() -> bool:
-        """Verifies if the Tesseract OCR binary is actually installed and reachable on the system PATH."""
-        # 1. Check system PATH
+        """Check whether the Tesseract executable is installed."""
+
         if shutil.which("tesseract"):
             return True
-        # 2. Check standard Windows installation directory
+
         default_win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-        if os.path.isfile(default_win_path):
-            return True
-        return False
+
+        return os.path.isfile(default_win_path)
 
     def extract_text_local_ocr(self, image: Image.Image) -> str:
-        """Extracts text using local Tesseract if available; otherwise returns empty string."""
+        """Extract supporting text using local Tesseract OCR."""
+
         if not self.is_tesseract_available():
-            logger.warning("Local Tesseract executable is not installed on this system.")
+            logger.warning(
+                "Local Tesseract executable is not installed."
+            )
             return ""
 
         try:
             import pytesseract
-            # If in default Windows location but not in PATH, configure it
+
             default_win_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-            if not shutil.which("tesseract") and os.path.isfile(default_win_path):
+
+            if (
+                not shutil.which("tesseract")
+                and os.path.isfile(default_win_path)
+            ):
                 pytesseract.pytesseract.tesseract_cmd = default_win_path
 
             text = pytesseract.image_to_string(image)
+
             return text.strip()
-        except Exception as e:
-            logger.warning(f"Local Tesseract OCR extraction failed: {e}")
+
+        except Exception as exc:
+            logger.warning(
+                "Local Tesseract OCR extraction failed: %s",
+                exc,
+            )
             return ""
 
     @staticmethod
     def is_rapidocr_available() -> bool:
-        """Checks whether the rapidocr-onnxruntime package is importable."""
+        """Check whether RapidOCR is installed."""
+
         try:
             import rapidocr_onnxruntime  # noqa: F401
             return True
+
         except ImportError:
             return False
 
     def extract_text_rapidocr(self, image: Image.Image) -> str:
-        """Extracts text using RapidOCR ONNX model — works fully offline, no system binaries needed.
+        """Extract text using the offline RapidOCR ONNX model.
 
-        RapidOCR returns a list of (bounding_box, text, confidence) tuples.
-        We reconstruct lines by grouping detections that share a similar Y-centre coordinate
-        and sort tokens left-to-right within each line.
+        Groups detected words into lines using their Y-centres
+        and sorts words from left to right.
         """
+
         try:
             import numpy as np
             from rapidocr_onnxruntime import RapidOCR
 
             engine = RapidOCR()
+
             img_arr = np.array(image.convert("RGB"))
+
             result, _ = engine(img_arr)
+
             if not result:
-                logger.warning("RapidOCR returned no detections for this image.")
+                logger.warning(
+                    "RapidOCR returned no detections for this image."
+                )
                 return ""
 
-            # Group bounding boxes into lines by Y-centre proximity (threshold: 14 px)
+            # Group bounding boxes into lines.
             lines_dict: dict[float, list[tuple[float, str]]] = {}
+
             for box, text, _score in result:
-                y_center = sum(pt[1] for pt in box) / 4.0
-                x_min = min(pt[0] for pt in box)
+                y_center = sum(point[1] for point in box) / 4.0
+                x_min = min(point[0] for point in box)
+
                 matched_y: float | None = None
+
                 for y_key in lines_dict:
                     if abs(y_key - y_center) < 14:
                         matched_y = y_key
                         break
+
                 if matched_y is None:
                     matched_y = y_center
                     lines_dict[matched_y] = []
+
                 lines_dict[matched_y].append((x_min, text))
 
+            # Reconstruct text lines.
             reconstructed: list[str] = []
+
             for y_key in sorted(lines_dict.keys()):
-                row = sorted(lines_dict[y_key], key=lambda t: t[0])
-                # Split CamelCase merges produced by RapidOCR (e.g. "OrganicBananas" → "Organic Bananas")
-                reconstructed.append(" ".join(_split_camel_merged_token(tok) for _, tok in row))
+                row = sorted(
+                    lines_dict[y_key],
+                    key=lambda item: item[0],
+                )
+
+                reconstructed.append(
+                    " ".join(
+                        _split_camel_merged_token(token)
+                        for _, token in row
+                    )
+                )
 
             extracted = "\n".join(reconstructed)
-            logger.info("RapidOCR extracted %d lines of text.", len(reconstructed))
+
+            logger.info(
+                "RapidOCR extracted %d lines of text.",
+                len(reconstructed),
+            )
+
             return extracted
 
         except Exception as exc:
-            logger.warning("RapidOCR extraction failed: %s", exc)
+            logger.warning(
+                "RapidOCR extraction failed: %s",
+                exc,
+            )
             return ""
 
     def process_receipt(
@@ -142,54 +187,95 @@ class OCREngine:
         embedded_text: str = "",
         initial_warnings: list[str] | None = None,
     ) -> ReceiptExtractionResult:
-        """Processes the receipt image and extracts structured data.
+        """Process a receipt image and extract structured information.
 
         Strategy:
-        1. Try Gemini Vision (primary) if API key is configured.
-        2. If Gemini is offline/unavailable, attempt local text extraction:
-           a. Tesseract (if installed on the host system).
-           b. RapidOCR ONNX (installed Python package — offline capable).
-        3. Feed extracted text to RegexHeuristicFallback.
-        4. If no text at all, return a FAILED result with clear warnings.
+        1. Use embedded PDF text if available.
+        2. Otherwise try local Tesseract OCR.
+        3. If Tesseract provides no text, try RapidOCR.
+        4. Send the image and extracted text to Gemini Vision.
+        5. If Gemini is unavailable or fails, use its offline
+           regex fallback with the available OCR text.
         """
+
         warnings = list(initial_warnings or [])
 
-        # ------------------------------------------------------------------ #
-        # 1. Build local OCR text (used as context for Gemini or as sole input)
-        # ------------------------------------------------------------------ #
-        ocr_text = embedded_text
+        # ---------------------------------------------------------
+        # 1. Start with embedded PDF text, if available.
+        # ---------------------------------------------------------
+        ocr_text = (embedded_text or "").strip()
 
-        if not ocr_text and self.is_tesseract_available():
-            ocr_text = self.extract_text_local_ocr(image)
-            if ocr_text:
-                warnings.append("Text pre-extracted via local Tesseract OCR.")
+        if ocr_text:
+            warnings.append(
+                "Text extracted from embedded PDF content."
+            )
 
-        if not ocr_text and self.is_rapidocr_available():
-            ocr_text = self.extract_text_rapidocr(image)
-            if ocr_text:
-                warnings.append("Text extracted via RapidOCR (offline ONNX model).")
+        # ---------------------------------------------------------
+        # 2. Try Tesseract OCR.
+        # ---------------------------------------------------------
+        if not ocr_text:
+            if self.is_tesseract_available():
+                ocr_text = self.extract_text_local_ocr(image)
 
-        # ------------------------------------------------------------------ #
-        # 2. Primary route: Gemini Vision
-        # ------------------------------------------------------------------ #
-        if self.gemini_extractor.is_available():
+                if ocr_text:
+                    warnings.append(
+                        "Text pre-extracted using local Tesseract OCR."
+                    )
+
+            else:
+                warnings.append(
+                    "Tesseract OCR binary is not installed."
+                )
+
+        # ---------------------------------------------------------
+        # 3. Try RapidOCR if Tesseract produced no text.
+        # ---------------------------------------------------------
+        if not ocr_text:
+            if self.is_rapidocr_available():
+                ocr_text = self.extract_text_rapidocr(image)
+
+                if ocr_text:
+                    warnings.append(
+                        "Text extracted using RapidOCR offline ONNX model."
+                    )
+
+            else:
+                warnings.append(
+                    "RapidOCR package is not installed. "
+                    "Install it using: pip install rapidocr-onnxruntime"
+                )
+
+        # ---------------------------------------------------------
+        # 4. Primary extraction: Gemini Vision.
+        #
+        # GeminiVisionExtractor handles missing API keys and
+        # API failures by invoking RegexHeuristicFallback.
+        # ---------------------------------------------------------
+        try:
             return self.gemini_extractor.extract(
                 image=image,
                 text_context=ocr_text,
                 initial_warnings=warnings,
             )
 
-        # ------------------------------------------------------------------ #
-        # 3. Offline fallback: regex heuristic on whatever text we could get
-        # ------------------------------------------------------------------ #
-        warnings.append("Gemini Vision API key is not configured. Running in offline fallback mode.")
-        if not self.is_tesseract_available():
-            warnings.append("Tesseract OCR binary is not installed on this system.")
-        if not self.is_rapidocr_available():
-            warnings.append("RapidOCR package is not installed (pip install rapidocr-onnxruntime).")
+        except Exception as exc:
+            logger.exception(
+                "Receipt extraction engine failed unexpectedly."
+            )
 
-        return self.fallback_parser.parse_text(
-            text=ocr_text,
-            initial_warnings=warnings,
-        )
-
+            return ReceiptExtractionResult(
+                status="failed",
+                document_type="receipt",
+                is_receipt=False,
+                error_code="AI_EXTRACTION_FAILED",
+                error_message=(
+                    "Receipt extraction failed unexpectedly."
+                ),
+                confidence=None,
+                items=[],
+                missing_fields=[],
+                uncertain_fields=[],
+                warnings=warnings + [
+                    f"Unexpected extraction error: {type(exc).__name__}: {exc}"
+                ],
+            )

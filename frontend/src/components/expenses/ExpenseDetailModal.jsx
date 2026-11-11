@@ -1,14 +1,5 @@
 import React from 'react';
-import {
-  Receipt,
-  Calendar,
-  Users,
-  CreditCard,
-  CheckCircle2,
-  AlertCircle,
-  Tag,
-  Sparkles
-} from 'lucide-react';
+import { CreditCard, Sparkles } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useExpenses } from '../../context/ExpenseContext';
 import Modal from '../common/Modal';

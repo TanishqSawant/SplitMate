@@ -26,26 +26,35 @@ export default function ItemSplitAssignment({ onFinalized }) {
     : allUsers;
 
   // Real-time calculation of member shares including pro-rated tax and tip
+  const itemsTotal = data.items.reduce((s, it) => s + (it.price || 0), 0);
+  const tax = data.tax || 0;
+  const tip = data.tip || 0;
+  const extraCharges = tax + tip;
+
   const memberBreakdown = groupMembers.map((member) => {
     let rawItemShare = 0;
     data.items.forEach((item) => {
       const assigned = item.assignedTo || [];
       if (assigned.includes(member.id)) {
-        rawItemShare += item.price / assigned.length;
+        rawItemShare += (item.price || 0) / assigned.length;
       }
     });
 
-    const itemsTotal = data.items.reduce((s, it) => s + it.price, 0);
-    const extraCharges = (data.tax || 0) + (data.tip || 0);
     const ratio = itemsTotal > 0 ? rawItemShare / itemsTotal : 0;
+    const allocatedTax = tax * ratio;
+    const allocatedTip = tip * ratio;
     const finalShare = rawItemShare + extraCharges * ratio;
 
     return {
       member,
       rawItemShare,
+      allocatedTax,
+      allocatedTip,
       finalShare: Number(finalShare.toFixed(2)),
     };
   });
+
+  const sumOfShares = memberBreakdown.reduce((sum, m) => sum + m.finalShare, 0);
 
   const handleFinalize = async () => {
     setIsSubmitting(true);
@@ -113,17 +122,22 @@ export default function ItemSplitAssignment({ onFinalized }) {
 
       {/* Real-time Calculated Shares Table */}
       <div className="space-y-2">
-        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-          Calculated Individual Shares (Items + Pro-Rated Tax & Tip)
-        </label>
+        <div className="flex items-center justify-between">
+          <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+            Calculated Individual Shares (Items + Pro-Rated Tax & Tip)
+          </label>
+          <span className="text-[11px] font-mono text-slate-400">
+            Sum: ${sumOfShares.toFixed(2)} / Total: ${(data.total || 0).toFixed(2)}
+          </span>
+        </div>
 
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800 overflow-hidden">
-          {memberBreakdown.map(({ member, finalShare }) => {
+          {memberBreakdown.map(({ member, rawItemShare, allocatedTax, allocatedTip, finalShare }) => {
             const isPayer = member.id === paidByUserId;
             return (
               <div
                 key={member.id}
-                className="flex items-center justify-between px-4 py-2.5 bg-slate-50/50 dark:bg-slate-800/40 text-xs"
+                className="flex flex-col sm:flex-row sm:items-center justify-between px-4 py-2.5 bg-slate-50/50 dark:bg-slate-800/40 text-xs gap-2"
               >
                 <div className="flex items-center gap-2.5">
                   <img
@@ -139,9 +153,12 @@ export default function ItemSplitAssignment({ onFinalized }) {
                       Paid Bill
                     </span>
                   )}
+                  <span className="text-[10px] text-slate-400 font-mono hidden md:inline">
+                    (${rawItemShare.toFixed(2)} items + ${(allocatedTax + allocatedTip).toFixed(2)} tax/tip)
+                  </span>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between sm:justify-end gap-2">
                   <span className="font-mono font-bold text-slate-900 dark:text-white">
                     ${finalShare.toFixed(2)}
                   </span>

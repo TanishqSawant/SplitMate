@@ -1,16 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Activity,
   CheckCircle2,
   AlertTriangle,
   RefreshCw,
-  Server,
-  Code,
-  ShieldCheck,
-  Sparkles
+  Server
 } from 'lucide-react';
 import { apiClient } from '../../api/client';
-import { API_ENDPOINTS } from '../../api/endpoints';
 import Button from '../common/Button';
 import Badge from '../common/Badge';
 

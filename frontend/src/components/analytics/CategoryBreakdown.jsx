@@ -1,5 +1,5 @@
 import React from 'react';
-import { PieChart, Utensils, ShoppingBag, Plane, Coffee, Home, Tag } from 'lucide-react';
+import { PieChart } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 
 export default function CategoryBreakdown() {
