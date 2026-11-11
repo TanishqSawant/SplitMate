@@ -7,10 +7,11 @@ mapping UUID to String for SQLite compatibility.
 
 import io
 import uuid
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text as sa_text
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
@@ -39,17 +40,24 @@ DEFAULT_TEST_USER_EMAIL = "primary_user@example.com"
 DEFAULT_TEST_USER_NAME = "Primary User"
 DEFAULT_TEST_USER_PASSWORD = "Password123!"
 
-# SQLite in-memory database for testing
-SQLALCHEMY_TEST_URL = "sqlite:///./test.db"
+# Use an absolute path for the SQLite test DB so it works regardless of CWD.
+# Each test session creates a fresh file and drops it in teardown.
+_TEST_DB_PATH = Path(__file__).parent / "test.db"
+SQLALCHEMY_TEST_URL = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
+
+# Remove any stale test DB from a previous aborted run before the engine is created.
+for _stale in (_TEST_DB_PATH, _TEST_DB_PATH.with_suffix(".db-wal"), _TEST_DB_PATH.with_suffix(".db-shm")):
+    _stale.unlink(missing_ok=True)
 
 engine = create_engine(
     SQLALCHEMY_TEST_URL, connect_args={"check_same_thread": False}
 )
 
-# Enable WAL mode and foreign keys for SQLite
+# Enable foreign keys for SQLite (do NOT use WAL mode — it causes cross-connection locking in tests)
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=DELETE")  # default journal, avoids WAL lock issues
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
@@ -59,7 +67,18 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 
 @pytest.fixture(scope="function")
 def db_session():
-    """Create a fresh database for each test, seeded with a primary test user."""
+    """Create a fresh database for each test, seeded with a primary test user.
+
+    Deletes and recreates the database file for each test to guarantee isolation
+    even after aborted test runs. This avoids SQLite WAL locking and FK-ordering
+    issues with drop_all.
+    """
+    # Dispose all connections so the file can be deleted
+    engine.dispose()
+    # Delete the DB file (and any WAL/SHM artifacts) to start completely fresh
+    for _f in (_TEST_DB_PATH, _TEST_DB_PATH.with_suffix(".db-wal"), _TEST_DB_PATH.with_suffix(".db-shm")):
+        _f.unlink(missing_ok=True)
+    # Recreate schema
     Base.metadata.create_all(bind=engine)
     session = TestingSessionLocal()
 
@@ -84,7 +103,9 @@ def db_session():
     finally:
         session.close()
         app.dependency_overrides.clear()
-        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+        for _f in (_TEST_DB_PATH, _TEST_DB_PATH.with_suffix(".db-wal"), _TEST_DB_PATH.with_suffix(".db-shm")):
+            _f.unlink(missing_ok=True)
 
 
 @pytest.fixture(scope="function")

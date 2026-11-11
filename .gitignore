@@ -221,6 +221,7 @@ __marimo__/
 
 
 # SplitMate - uploads directory (runtime data)
+uploads/
 backend/uploads/
 
 # Node.js (frontend)

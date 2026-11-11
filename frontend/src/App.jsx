@@ -31,6 +31,7 @@ function MainApp() {
 
   const { loadSampleReceipt } = useExpenses();
 
+  // Show auth view if not authenticated or no user
   if (!isAuthenticated || !currentUser) {
     return <AuthView />;
   }
@@ -123,23 +124,23 @@ function MainApp() {
   );
 }
 
-export default function App() {
-  const paypalOptions = {
-    clientId: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_PAYPAL_CLIENT_ID) || 'sb',
-    currency: 'USD',
-    intent: 'capture',
-    components: 'buttons',
-  };
+const paypalScriptOptions = {
+  clientId: import.meta.env.VITE_PAYPAL_CLIENT_ID || 'sb',
+  currency: 'USD',
+  intent: 'capture',
+  components: 'buttons',
+};
 
+export default function App() {
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <PayPalScriptProvider options={paypalOptions}>
+    <PayPalScriptProvider options={paypalScriptOptions}>
+      <ThemeProvider>
+        <AuthProvider>
           <ExpenseProvider>
             <MainApp />
           </ExpenseProvider>
-        </PayPalScriptProvider>
-      </AuthProvider>
-    </ThemeProvider>
+        </AuthProvider>
+      </ThemeProvider>
+    </PayPalScriptProvider>
   );
 }

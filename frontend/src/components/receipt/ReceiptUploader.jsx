@@ -1,11 +1,13 @@
 import React, { useState, useRef } from 'react';
 import {
   UploadCloud,
+  FileImage,
   Sparkles,
+  CheckCircle,
+  AlertCircle,
   ArrowRight,
   Camera,
-  FileText,
-  AlertCircle
+  Layers
 } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import { MOCK_SAMPLE_RECEIPTS } from '../../api/mockData';
@@ -15,14 +17,11 @@ import Badge from '../common/Badge';
 export default function ReceiptUploader() {
   const { receiptScan, processReceiptFile, loadSampleReceipt } = useExpenses();
   const [isDragging, setIsDragging] = useState(false);
-  const [uploadError, setUploadError] = useState(null);
   const fileInputRef = useRef(null);
-
-  const isProcessing = receiptScan.status === 'uploading' || receiptScan.status === 'processing';
 
   const handleDragOver = (e) => {
     e.preventDefault();
-    if (!isProcessing) setIsDragging(true);
+    setIsDragging(true);
   };
 
   const handleDragLeave = () => {
@@ -32,40 +31,17 @@ export default function ReceiptUploader() {
   const handleDrop = (e) => {
     e.preventDefault();
     setIsDragging(false);
-    if (isProcessing) return;
-
-    setUploadError(null);
     const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      handleFileSelected(files[0]);
+    if (files.length > 0 && (files[0].type.startsWith('image/') || files[0].type === 'application/pdf' || files[0].name.endsWith('.pdf'))) {
+      processReceiptFile(files[0]);
     }
   };
 
   const handleFileChange = (e) => {
     const files = e.target.files;
     if (files.length > 0) {
-      handleFileSelected(files[0]);
+      processReceiptFile(files[0]);
     }
-  };
-
-  const handleFileSelected = (file) => {
-    setUploadError(null);
-    const validExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'];
-    const name = file.name || '';
-    const ext = name.substring(name.lastIndexOf('.')).toLowerCase();
-    const isMimeValid = file.type?.startsWith('image/') || file.type === 'application/pdf';
-
-    if (!validExtensions.includes(ext) && !isMimeValid) {
-      setUploadError("Unsupported format. Please upload a JPG, JPEG, PNG, WEBP, or PDF receipt.");
-      return;
-    }
-
-    if (file.size > 10 * 1024 * 1024) {
-      setUploadError(`File is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). Maximum allowed size is 10 MB.`);
-      return;
-    }
-
-    processReceiptFile(file);
   };
 
   return (
@@ -75,22 +51,17 @@ export default function ReceiptUploader() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={() => {
-          if (!isProcessing) fileInputRef.current?.click();
-        }}
-        className={`relative border-2 border-dashed rounded-3xl p-8 sm:p-12 text-center transition-all ${
-          isProcessing
-            ? 'border-blue-500 bg-blue-50/40 dark:bg-blue-950/20 cursor-wait'
-            : isDragging
-            ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/30 scale-[1.01] cursor-pointer'
-            : 'border-slate-300 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-500 bg-white dark:bg-slate-900/60 cursor-pointer'
+        onClick={() => fileInputRef.current?.click()}
+        className={`relative border-2 border-dashed rounded-3xl p-8 sm:p-12 text-center transition-all cursor-pointer ${
+          isDragging
+            ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-950/30 scale-[1.01]'
+            : 'border-slate-300 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-500 bg-white dark:bg-slate-900/60'
         }`}
       >
         <input
           ref={fileInputRef}
           type="file"
-          accept=".jpg,.jpeg,.png,.webp,.pdf,image/jpeg,image/png,image/webp,application/pdf"
-          disabled={isProcessing}
+          accept="image/png, image/jpeg, image/webp, application/pdf, .pdf"
           className="hidden"
           onChange={handleFileChange}
         />
@@ -104,25 +75,17 @@ export default function ReceiptUploader() {
             Upload or drop your receipt image
           </h3>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 mb-4 leading-relaxed">
-            Supports JPG, JPEG, PNG, WEBP, and PDF up to 10 MB. Computer vision OCR will extract verified merchant details, line items, and taxes.
+            Supports JPG, PNG, WebP, and PDF up to 15MB. Pawan's vision AI model will instantly parse line items, tax, and totals.
           </p>
-
-          {uploadError && (
-            <div className="mb-4 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-900 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
-              <span>{uploadError}</span>
-            </div>
-          )}
 
           <div className="flex items-center gap-3">
             <Button
               variant="primary"
               size="md"
               icon={Camera}
-              disabled={isProcessing}
               onClick={(e) => {
                 e.stopPropagation();
-                if (!isProcessing) fileInputRef.current?.click();
+                fileInputRef.current?.click();
               }}
             >
               Choose Receipt File
@@ -130,14 +93,16 @@ export default function ReceiptUploader() {
           </div>
         </div>
 
-        {/* Upload & AI extraction Progress Bar with Active Stages */}
-        {isProcessing && (
-          <div className="absolute inset-0 bg-white/95 dark:bg-slate-900/95 rounded-3xl flex flex-col items-center justify-center p-6 backdrop-blur-sm z-20 animate-in fade-in duration-200">
+        {/* Upload & AI extraction Progress Bar */}
+        {(receiptScan.status === 'uploading' || receiptScan.status === 'processing') && (
+          <div className="absolute inset-0 bg-white/95 dark:bg-slate-900/95 rounded-3xl flex flex-col items-center justify-center p-6 backdrop-blur-sm z-20">
             <div className="w-full max-w-md space-y-4">
               <div className="flex items-center justify-between text-sm">
                 <span className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-purple-600 animate-spin" />
-                  {receiptScan.stage || 'Uploading receipt...'}
+                  {receiptScan.status === 'uploading'
+                    ? 'Uploading receipt image...'
+                    : "Pawan's AI Vision OCR analyzing line items..."}
                 </span>
                 <span className="font-mono text-xs text-blue-600 dark:text-blue-400 font-bold">
                   {receiptScan.progress}%
@@ -146,56 +111,42 @@ export default function ReceiptUploader() {
 
               <div className="w-full h-2.5 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 rounded-full transition-all duration-500"
+                  className="h-full bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 rounded-full transition-all duration-300"
                   style={{ width: `${receiptScan.progress}%` }}
                 />
               </div>
 
-              {/* Dynamic Step Progression List — reflects the real upload→poll pipeline */}
-              <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-500 dark:text-slate-400 pt-1">
-                <span className={receiptScan.progress >= 15 ? 'text-blue-600 dark:text-blue-400 font-bold' : 'opacity-60'}>
-                  1. Uploading to server...
-                </span>
-                <span className={receiptScan.progress >= 35 ? 'text-blue-600 dark:text-blue-400 font-bold' : 'opacity-60'}>
-                  2. Analyzing receipt...
-                </span>
-                <span className={receiptScan.progress >= 55 ? 'text-blue-600 dark:text-blue-400 font-bold' : 'opacity-60'}>
-                  3. Extracting items...
-                </span>
-                <span className={receiptScan.progress >= 85 ? 'text-blue-600 dark:text-blue-400 font-bold' : 'opacity-60'}>
-                  4. Calculating totals...
-                </span>
-              </div>
+              <p className="text-xs text-slate-400 text-center">
+                Extracting merchant details, item names, individual prices, tax, and tip...
+              </p>
             </div>
           </div>
         )}
       </div>
 
-      {/* Pre-Scanned Benchmarks (Exclusively for Offline Demo Presentations) */}
+      {/* Quick Demo Receipts Selection (Crucial for Hackathon presentation) */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200/80 dark:border-slate-800 shadow-xs">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+        <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <FileText className="w-4 h-4 text-purple-600" />
+            <Sparkles className="w-4 h-4 text-purple-600" />
             <h4 className="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wider">
-              Hackathon Demo Benchmark Samples
+              One-Click Hackathon Demo Samples
             </h4>
           </div>
           <Badge variant="purple" size="sm">
-            Pre-Scanned Test Fixtures
+            AI Test Data
           </Badge>
         </div>
 
         <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
-          Click any pre-recorded fixture below to test itemized split calculations and PayPal Sandbox transactions. Uploading your own image above runs live AI extraction without using sample data.
+          Click any pre-scanned receipt below to test line-item splitting, tax pro-ration, and PayPal sandbox payments:
         </p>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           {MOCK_SAMPLE_RECEIPTS.map((sample) => (
             <div
               key={sample.id}
-              onClick={() => {
-                if (!isProcessing) loadSampleReceipt(sample.id);
-              }}
+              onClick={() => loadSampleReceipt(sample.id)}
               className="group border border-slate-200 dark:border-slate-800 rounded-2xl p-3.5 hover:border-blue-500 dark:hover:border-blue-500 hover:shadow-md transition-all cursor-pointer bg-slate-50/50 dark:bg-slate-800/40 flex flex-col justify-between"
             >
               <div>
@@ -206,7 +157,7 @@ export default function ReceiptUploader() {
                     className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                   />
                   <span className="absolute top-2 right-2 bg-slate-900/80 backdrop-blur-xs text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded-md">
-                    Sample #{sample.id}
+                    {Math.round(sample.confidence * 100)}% AI Match
                   </span>
                 </div>
 
@@ -214,7 +165,7 @@ export default function ReceiptUploader() {
                   {sample.merchant}
                 </p>
                 <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">
-                  {sample.items.length} items • {sample.category}
+                  {sample.items.length} extracted items • {sample.category}
                 </p>
               </div>
 

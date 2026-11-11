@@ -4,6 +4,7 @@ import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -39,6 +40,35 @@ from app.services.split_calculator import calculate_splits_for_expense, is_expen
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
 
 
+@router.get(
+    "",
+    response_model=list[ExpenseResponse],
+    summary="List all expenses for groups the current user belongs to",
+)
+def list_my_expenses(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Get all groups user belongs to
+    normalized_email = current_user.email.strip().lower()
+    user_groups = (
+        db.query(ExpenseGroup)
+        .outerjoin(GroupMember, ExpenseGroup.id == GroupMember.group_id)
+        .filter(
+            (ExpenseGroup.creator_id == current_user.id)
+            | (GroupMember.user_id == current_user.id)
+            | (func.lower(GroupMember.email) == normalized_email)
+        )
+        .distinct()
+        .all()
+    )
+    group_ids = [g.id for g in user_groups]
+
+    # Get all expenses for those groups
+    expenses = db.query(Expense).filter(Expense.group_id.in_(group_ids)).order_by(Expense.created_at.desc()).all()
+    return expenses
+
+
 @router.post(
     "",
     response_model=ExpenseResponse,
@@ -56,29 +86,6 @@ def create_expense(
     # Fix 1 & IDOR: Validate receipt access if provided
     if body.receipt_id:
         receipt = require_receipt_access(db, body.receipt_id, current_user)
-
-        # Receipt extraction must be complete before an expense can be created
-        if receipt.extraction_status != ExtractionStatus.COMPLETED:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Receipt extraction has not completed yet. "
-                    "Wait for AI extraction to finish before creating an expense."
-                ),
-            )
-
-        # If the receipt has an extracted total, the submitted amount must match exactly
-        if receipt.total is not None:
-            submitted = Decimal(str(body.total_amount))
-            extracted = Decimal(str(receipt.total))
-            if submitted != extracted:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Expense total ({submitted}) does not match the extracted receipt total "
-                        f"({extracted}). Use the extracted total or correct the receipt first."
-                    ),
-                )
 
         # Receipt extraction must be complete before an expense can be created
         if receipt.extraction_status != ExtractionStatus.COMPLETED:
@@ -273,18 +280,6 @@ def initialize_payments(
     current_user: User = Depends(get_current_user),
 ):
     expense = require_expense_access(db, expense_id, current_user)
-
-    # Fix 4: Block payment initialization if any receipt items are unassigned / partially assigned
-    if expense.receipt_id:
-        fully_assigned, unassigned_details = is_expense_fully_assigned(expense)
-        if not fully_assigned:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Cannot initialize payments: some receipt items have not been fully assigned. "
-                    + unassigned_details
-                ),
-            )
 
     # Fix 4: Block payment initialization if any receipt items are unassigned / partially assigned
     if expense.receipt_id:

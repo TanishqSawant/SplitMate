@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import {
   CreditCard,
+  ShieldCheck,
   CheckCircle2,
   AlertCircle,
   Lock,
+  ArrowRight,
+  ExternalLink,
   Copy,
   Check,
   RotateCcw,
@@ -14,8 +17,10 @@ import { PayPalButtons, usePayPalScriptReducer } from '@paypal/react-paypal-js';
 import { useExpenses } from '../../context/ExpenseContext';
 import Modal from '../common/Modal';
 import Button from '../common/Button';
+import Badge from '../common/Badge';
 
 export default function PayPalPaymentModal() {
+<<<<<<< HEAD
   const {
     payPalModal,
     closePayPalModal,
@@ -45,6 +50,14 @@ export default function PayPalPaymentModal() {
     paymentId,
     expenseId,
   } = payPalModal;
+=======
+  const { payPalModal, closePayPalModal, executePayPalPayment } = useExpenses();
+  const [copied, setCopied] = useState(false);
+
+  if (!payPalModal.isOpen) return null;
+
+  const { payer, receiver, amount, currency, note, status, transactionId, error, paymentId } = payPalModal;
+>>>>>>> c371a97313312aa71e8b6e2fcb72737f7bb284d9
 
   const handleCopyTxn = () => {
     if (transactionId) {
@@ -54,6 +67,7 @@ export default function PayPalPaymentModal() {
     }
   };
 
+<<<<<<< HEAD
   const handleCopyOrder = () => {
     if (orderId) {
       navigator.clipboard.writeText(orderId);
@@ -64,6 +78,16 @@ export default function PayPalPaymentModal() {
 
   const isBusy = status === 'initiating' || status === 'authorizing' || status === 'capturing';
 
+=======
+  const handleExecute = () => {
+    if (paymentId) {
+      executePayPalPayment(paymentId);
+    } else {
+      console.error('[SplitMate] No payment ID available');
+    }
+  };
+
+>>>>>>> c371a97313312aa71e8b6e2fcb72737f7bb284d9
   return (
     <Modal
       isOpen={payPalModal.isOpen}
@@ -141,6 +165,7 @@ export default function PayPalPaymentModal() {
               </div>
             </div>
 
+<<<<<<< HEAD
             {/* Backend payment missing notification if neither paymentId nor expenseId is attached */}
             {!paymentId && !expenseId && (
               <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2.5">
@@ -198,6 +223,20 @@ export default function PayPalPaymentModal() {
 
             <p className="text-[11px] text-center text-slate-400">
               Payments are securely authorized and captured via PayPal Sandbox APIs with zero duplicate charges.
+=======
+            {/* Yellow PayPal Branded Button */}
+            <button
+              onClick={handleExecute}
+              disabled={!paymentId}
+              className="w-full py-3.5 px-6 rounded-2xl bg-[#FFC439] hover:bg-[#F2BA36] text-[#003087] font-black text-base shadow-md hover:shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span>Pay with</span>
+              <span className="italic font-extrabold text-lg tracking-tight">PayPal</span>
+            </button>
+
+            <p className="text-[11px] text-center text-slate-400">
+              Payments are routed via Tanay's FastAPI Sandbox integration endpoints.
+>>>>>>> c371a97313312aa71e8b6e2fcb72737f7bb284d9
             </p>
           </div>
         )}
@@ -274,7 +313,7 @@ export default function PayPalPaymentModal() {
 
               <div className="flex justify-between">
                 <span>Timestamp:</span>
-                <span>{captureTime}</span>
+                <span>{new Date().toLocaleTimeString()}</span>
               </div>
               <div className="flex justify-between">
                 <span>Status:</span>
@@ -346,6 +385,7 @@ export default function PayPalPaymentModal() {
               <Button variant="ghost" size="md" onClick={closePayPalModal} className="flex-1">
                 Cancel
               </Button>
+<<<<<<< HEAD
               <Button
                 variant="paypal"
                 size="md"
@@ -354,6 +394,10 @@ export default function PayPalPaymentModal() {
                 className="flex-1"
               >
                 Try Again
+=======
+              <Button variant="paypal" size="md" onClick={handleExecute} className="flex-1" disabled={!paymentId}>
+                Retry Payment
+>>>>>>> c371a97313312aa71e8b6e2fcb72737f7bb284d9
               </Button>
             </div>
           </div>

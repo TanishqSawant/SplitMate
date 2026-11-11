@@ -19,34 +19,35 @@ export const API_ENDPOINTS = {
 
   // Groups & Members (Tanishq)
   GROUPS: {
-    LIST: '/groups',
-    CREATE: '/groups',
-    DETAILS: (groupId) => `/groups/${groupId}`,
-    ADD_MEMBER: (groupId) => `/groups/${groupId}/members`,
-    BALANCES: (groupId) => `/groups/${groupId}/balances`,
+    LIST: '/api/groups',
+    CREATE: '/api/groups',
+    DETAILS: (groupId) => `/api/groups/${groupId}`,
+    MEMBERS: (groupId) => `/api/groups/${groupId}/members`,
+    ADD_MEMBER: (groupId) => `/api/groups/${groupId}/members`,
+    BALANCES: (groupId) => `/api/groups/${groupId}/balances`,
   },
 
   // Expense Management (Tanishq)
   EXPENSES: {
-    LIST: '/expenses',
-    CREATE: '/expenses',
-    DETAILS: (expenseId) => `/expenses/${expenseId}`,
-    DELETE: (expenseId) => `/expenses/${expenseId}`,
-    SETTLE: '/expenses/settle',
-    ASSIGN: (expenseId) => `/expenses/${expenseId}/assign`,
-    SPLITS: (expenseId) => `/expenses/${expenseId}/splits`,
-    INITIALIZE_PAYMENTS: (expenseId) => `/expenses/${expenseId}/initialize-payments`,
+    LIST: '/api/expenses',
+    CREATE: '/api/expenses',
+    DETAILS: (expenseId) => `/api/expenses/${expenseId}`,
+    ASSIGN: (expenseId) => `/api/expenses/${expenseId}/assign`,
+    SPLITS: (expenseId) => `/api/expenses/${expenseId}/splits`,
+    INITIALIZE_PAYMENTS: (expenseId) => `/api/expenses/${expenseId}/initialize-payments`,
+    DELETE: (expenseId) => `/api/expenses/${expenseId}`,
+    SETTLE: '/api/expenses/settle',
   },
 
-  // AI Receipt Extraction (Pawan + Tanishq)
-  // Backend contract (receipts.py):
-  //   POST /api/receipts/upload           → upload file, returns {id, extraction_status: 'PENDING'}
-  //   GET  /api/receipts/{receipt_id}     → poll status; extraction_status becomes 'COMPLETED' once Pawan's AI service processes it
-  //   POST /api/receipts/{receipt_id}/extraction → Pawan's AI service submits results (internal, not called by frontend)
+  // AI Receipt Extraction (Pawan)
   RECEIPTS: {
     UPLOAD: '/receipts/upload',
+    EXTRACT: '/receipts/extract',
+    DETAILS: (receiptId) => `/receipts/${receiptId}`,
     GET: (receiptId) => `/receipts/${receiptId}`,
+    REVIEW: (receiptId) => `/receipts/${receiptId}/review`,
     SUBMIT_EXTRACTION: (receiptId) => `/receipts/${receiptId}/extraction`,
+    SAMPLE_RECEIPTS: '/receipts/samples',
   },
 
   // PayPal Sandbox Integration (Tanay & Dhruv - Phase 9)
@@ -55,10 +56,10 @@ export const API_ENDPOINTS = {
   //   POST /api/payments/{payment_id}/capture       → captures order server-side (status: order_created -> captured)
   //   GET  /api/payments/{payment_id}               → checks verified status
   PAYMENTS: {
-    CREATE_ORDER: (paymentId) => `/payments/${paymentId}/create-order`,
-    CAPTURE: (paymentId) => `/payments/${paymentId}/capture`,
-    GET: (paymentId) => `/payments/${paymentId}`,
-    HISTORY: '/payments/history',
+    CREATE_ORDER: (paymentId) => `/api/payments/${paymentId}/create-order`,
+    CAPTURE: (paymentId) => `/api/payments/${paymentId}/capture`,
+    GET: (paymentId) => `/api/payments/${paymentId}`,
+    HISTORY: '/api/payments/history',
   },
 
   // Analytics & Insights (Tanishq / Dhruv)
@@ -68,4 +69,3 @@ export const API_ENDPOINTS = {
     DEBT_GRAPH: '/analytics/debt-simplification',
   }
 };
-

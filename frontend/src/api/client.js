@@ -5,15 +5,15 @@
  * and resilient mock fallback for hackathon presentations.
  */
 
-import { API_ENDPOINTS } from './endpoints.js';
+import { API_ENDPOINTS } from './endpoints';
 import {
   MOCK_USERS,
   MOCK_GROUPS,
   MOCK_EXPENSES
-} from './mockData.js';
+} from './mockData';
 
-const BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || 'http://localhost:8000/api';
-const USE_MOCK_API = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_USE_MOCK_API === 'true');
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+const USE_MOCK_FALLBACK = import.meta.env.VITE_USE_MOCK_API === 'true';
 const DEFAULT_TIMEOUT_MS = 10000;
 
 class ApiClient {
@@ -166,7 +166,7 @@ class ApiClient {
           throw new Error('Unable to connect to the backend service. Please ensure the server is running on http://localhost:8000.');
         }
 
-        if (USE_MOCK_API) {
+        if (USE_MOCK_FALLBACK) {
           console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to mock service.`);
           return this.handleMockFallback(endpoint, options);
         }
@@ -241,11 +241,90 @@ class ApiClient {
       }
     }
 
-    // 5. AI Receipt Extraction & PayPal Payments (Never mock real financial transactions)
-    if (typeof endpoint === 'string' && (endpoint.includes('/receipts') || endpoint.includes('/payments'))) {
-      throw new Error(
-        'Real PayPal payments and AI receipt extraction require the backend service to be running.'
-      );
+    // 5. AI Receipt Extraction (Pawan's contract)
+    if (endpoint === API_ENDPOINTS.RECEIPTS.EXTRACT || endpoint === API_ENDPOINTS.RECEIPTS.UPLOAD) {
+      await new Promise((r) => setTimeout(r, 600));
+      return {
+        receipt_id: `receipt_${Date.now()}`,
+        extraction_status: 'completed',
+      };
+    }
+
+    if (endpoint.startsWith('/receipts/') && method === 'GET') {
+      await new Promise((r) => setTimeout(r, 400));
+      return {
+        receipt_id: endpoint.split('/')[2] || `receipt_${Date.now()}`,
+        original_filename: 'demo-receipt.jpg',
+        merchant_name: 'Artisan Cafe & Grill',
+        currency: 'USD',
+        tax: 7.20,
+        subtotal: 78.50,
+        total: 97.70,
+        extraction_status: 'completed',
+        confidence: 0.97,
+        warnings: null,
+        missing_fields: null,
+        uncertain_fields: null,
+        is_user_reviewed: false,
+        created_at: new Date().toISOString(),
+        items: [
+          { id: 'ext_1', item_name: 'Signature Truffle Burger', quantity: 2, unit_price: 19.00, total_price: 38.00 },
+          { id: 'ext_2', item_name: 'Sweet Potato Truffle Fries', quantity: 1, unit_price: 11.50, total_price: 11.50 },
+          { id: 'ext_3', item_name: 'Artisan Lemonade', quantity: 2, unit_price: 7.00, total_price: 14.00 },
+          { id: 'ext_4', item_name: 'Chocolate Molten Cake', quantity: 1, unit_price: 15.00, total_price: 15.00 },
+        ]
+      };
+    }
+
+    if (endpoint.includes('/review') && method === 'PUT') {
+      const body = JSON.parse(options.body || '{}');
+      return {
+        receipt_id: endpoint.split('/')[2],
+        original_filename: 'reviewed-receipt.jpg',
+        merchant_name: body.merchant_name,
+        currency: body.currency,
+        tax: body.tax,
+        subtotal: body.subtotal,
+        total: body.total,
+        extraction_status: 'completed',
+        confidence: 1.0,
+        warnings: null,
+        is_user_reviewed: true,
+        created_at: new Date().toISOString(),
+        items: (body.items || []).map((it, idx) => ({
+          id: `rev_${idx}`,
+          item_name: it.item_name,
+          quantity: it.quantity,
+          unit_price: it.unit_price,
+          total_price: it.total_price,
+        }))
+      };
+    }
+
+    // 6. PayPal Create Order (Tanay's contract)
+    if (endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER) {
+      const body = JSON.parse(options.body || '{}');
+      return {
+        orderId: `ORDER-${Math.random().toString(36).substring(2, 11).toUpperCase()}`,
+        status: 'CREATED',
+        amount: body.amount,
+        currency: body.currency || 'USD',
+        approvalUrl: 'https://www.sandbox.paypal.com/checkoutnow?token=mock_sandbox_token'
+      };
+    }
+
+    // 7. PayPal Capture Order (Tanay's contract)
+    if (endpoint === API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER) {
+      const body = JSON.parse(options.body || '{}');
+      return {
+        captureId: `CAPTURE-${Math.random().toString(36).substring(2, 12).toUpperCase()}`,
+        orderId: body.orderId,
+        status: 'COMPLETED',
+        amount: body.amount,
+        payer: body.payerId,
+        receiver: body.receiverEmail,
+        timestamp: new Date().toISOString(),
+      };
     }
 
     // Default fallback

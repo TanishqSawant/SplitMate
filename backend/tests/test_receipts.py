@@ -60,7 +60,7 @@ def test_upload_receipt(client):
     data = response.json()
     assert data["original_filename"] == "receipt.jpg"
     assert data["extraction_status"] == "pending"
-    assert "id" in data
+    assert "receipt_id" in data
 
 
 def test_upload_receipt_invalid_type(client):
@@ -73,11 +73,12 @@ def test_upload_receipt_invalid_type(client):
 def test_get_receipt(client):
     upload_resp = _upload(client, "receipt.png", VALID_PNG_BYTES, "image/png")
     assert upload_resp.status_code == 201
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.get(f"/api/receipts/{receipt_id}")
     assert response.status_code == 200
     assert response.json()["original_filename"] == "receipt.png"
+    assert response.json()["receipt_id"] == receipt_id
 
 
 def test_get_receipt_not_found(client):
@@ -145,7 +146,7 @@ def test_submit_extraction(client):
     """Fix 3: Correct AI key allows extraction to proceed."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
     assert upload_resp.status_code == 201
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -162,7 +163,7 @@ def test_submit_extraction(client):
 def test_submit_extraction_duplicate(client):
     """Duplicate extraction submission is rejected with 409."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     payload = {
         "merchant_name": "Test",
@@ -196,7 +197,7 @@ def test_submit_extraction_duplicate(client):
 def test_extraction_missing_ai_key_returns_401(client):
     """Fix 3 — scenario 7: Missing X-Internal-Service-Key header returns 401."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -210,7 +211,7 @@ def test_extraction_missing_ai_key_returns_401(client):
 def test_extraction_incorrect_ai_key_returns_403(client):
     """Fix 3 — scenario 8: Wrong X-Internal-Service-Key header returns 403."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -224,7 +225,7 @@ def test_extraction_incorrect_ai_key_returns_403(client):
 def test_extraction_correct_ai_key_returns_200(client):
     """Fix 3 — scenario 9: Correct X-Internal-Service-Key header returns 200."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
