@@ -1,4 +1,9 @@
 
+from decimal import Decimal
+from PIL import Image
+from app.services.receipt_extractor import ReceiptExtractionService
+
+
 def test_ocr_preprocessing_uses_offline_fallback_when_gemini_unavailable():
     """Local OCR text is used by the offline fallback when Gemini is unavailable."""
     service = ReceiptExtractionService()

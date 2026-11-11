@@ -1,385 +1,262 @@
-
-/**
- * SplitMate API Client Service Layer
- *
- * Provides unified request execution, timeout handling, error normalization,
- * and resilient mock fallback for offline hackathon presentations.
- */
-
-import { API_ENDPOINTS } from './endpoints.js';
+import React from 'react';
 import {
-  MOCK_USERS,
-  MOCK_GROUPS,
-  MOCK_EXPENSES,
-} from './mockData.js';
+  Sparkles,
+  RotateCcw,
+  UploadCloud,
+  Clock,
+  AlertTriangle,
+  ServerCrash,
+  WifiOff,
+} from 'lucide-react';
+import { useExpenses } from '../context/ExpenseContext';
+import ReceiptUploader from '../components/receipt/ReceiptUploader';
+import ReceiptPreview from '../components/receipt/ReceiptPreview';
+import ExtractionResult from '../components/receipt/ExtractionResult';
+import ItemSplitAssignment from '../components/receipt/ItemSplitAssignment';
+import Button from '../components/common/Button';
+import Badge from '../components/common/Badge';
 
-const BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
-
-const DEFAULT_TIMEOUT_MS = 30000;
-
-class ApiClient {
-  constructor() {
-    this.baseURL = BASE_URL;
-    this.isBackendAvailable = null;
-    this.onStatusChangeCallbacks = new Set();
-  }
-
-  subscribeStatus(callback) {
-    this.onStatusChangeCallbacks.add(callback);
-    callback({
-      isOnline: this.isBackendAvailable,
-      baseURL: this.baseURL,
-    });
-    return () => this.onStatusChangeCallbacks.delete(callback);
-  }
-
-  notifyStatus(isOnline) {
-    if (this.isBackendAvailable !== isOnline) {
-      this.isBackendAvailable = isOnline;
-      this.onStatusChangeCallbacks.forEach((callback) =>
-        callback({
-          isOnline: this.isBackendAvailable,
-          baseURL: this.baseURL,
-        })
-      );
-    }
-  }
-
-  async checkHealth() {
-    const candidates = [];
-    const configuredBase = this.baseURL.replace(/\/api\/?$/, '');
-
-    candidates.push(configuredBase);
-
-    if (configuredBase.includes('localhost:8000')) {
-      candidates.push(
-        configuredBase.replace('localhost:8000', '127.0.0.1:8000')
-      );
-    } else if (configuredBase.includes('127.0.0.1:8000')) {
-      candidates.push(
-        configuredBase.replace('127.0.0.1:8000', 'localhost:8000')
-      );
-    }
-
-    for (const host of [...new Set(candidates)]) {
-      for (const healthPath of [API_ENDPOINTS.HEALTH, '/api/health']) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-        try {
-          const response = await fetch(`${host}${healthPath}`, {
-            method: 'GET',
-            headers: { Accept: 'application/json' },
-            signal: controller.signal,
-          });
-
-          if (response.ok) {
-            const data = await response.json();
-
-            if (host !== configuredBase) {
-              this.baseURL = `${host}/api`;
-              console.info(
-                `[SplitMate API] Connected to active host: ${this.baseURL}`
-              );
-            }
-
-            this.notifyStatus(true);
-            return { online: true, data };
-          }
-        } catch {
-          // Try the next host.
-        } finally {
-          clearTimeout(timeoutId);
-        }
-      }
-    }
-
-    this.notifyStatus(false);
-    return { online: false, error: 'Unreachable' };
-  }
-
-  async request(endpoint, options = {}) {
-    const url = `${this.baseURL}${endpoint}`;
-    const controller = new AbortController();
-
-    const isReceiptAction =
-      endpoint.startsWith('/receipts/upload') ||
-      endpoint.includes('/extract');
-
-    const timeoutMs =
-      options.timeout || (isReceiptAction ? 90000 : DEFAULT_TIMEOUT_MS);
-
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    const headers = {
-      Accept: 'application/json',
-      ...(!options.isFormData && { 'Content-Type': 'application/json' }),
-      ...options.headers,
-    };
-
-    try {
-      const { isFormData, timeout, _retried, ...fetchOptions } = options;
-
-      const response = await fetch(url, {
-        ...fetchOptions,
-        headers,
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => ({}));
-        throw new Error(
-          errorBody.detail ||
-            errorBody.message ||
-            `HTTP ${response.status}: ${response.statusText}`
-        );
-      }
-
-      this.notifyStatus(true);
-
-      if (response.status === 204) {
-        return null;
-      }
-
-      return await response.json();
-    } catch (err) {
-      const isNetworkError =
-        err.name === 'AbortError' ||
-        err.name === 'TypeError' ||
-        /failed to fetch|fetch failed|networkerror|connection refused/i.test(
-          err.message || ''
-        );
-
-      // Retry once using the alternate localhost address.
-      if (isNetworkError && !options._retried) {
-        let alternateBase = null;
-
-        if (this.baseURL.includes('localhost:8000')) {
-          alternateBase = this.baseURL.replace(
-            'localhost:8000',
-            '127.0.0.1:8000'
-          );
-        } else if (this.baseURL.includes('127.0.0.1:8000')) {
-          alternateBase = this.baseURL.replace(
-            '127.0.0.1:8000',
-            'localhost:8000'
-          );
-        }
-
-        if (alternateBase) {
-          const originalBase = this.baseURL;
-          this.baseURL = alternateBase;
-
-          try {
-            return await this.request(endpoint, {
-              ...options,
-              _retried: true,
-            });
-          } catch (retryError) {
-            this.baseURL = originalBase;
-            // Continue to offline handling below.
-            err = retryError;
-          }
-        }
-      }
-
-      if (isNetworkError) {
-        this.notifyStatus(false);
-
-        const isReceiptEndpoint = endpoint.startsWith('/receipts');
-
-        // Never fabricate receipt extraction results.
-        if (isReceiptEndpoint) {
-          throw new Error(
-            err.name === 'AbortError'
-              ? 'Receipt processing timed out. Please try again.'
-              : 'Unable to connect to the receipt extraction service. Please ensure the backend server is running.'
-          );
-        }
-
-        const allowMock =
-          import.meta.env.VITE_ENABLE_MOCK_FALLBACK !== 'false';
-
-        if (!allowMock) {
-          throw new Error(
-            'SplitMate API is currently offline. Please check your connection or try again.'
-          );
-        }
-
-        console.warn(
-          `[SplitMate API] Backend unreachable at ${url}. Using mock fallback.`,
-          err
-        );
-
-        return this.handleMockFallback(endpoint, {
-          ...options,
-          isTimeout: err.name === 'AbortError',
-        });
-      }
-
-      throw err;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  async handleMockFallback(endpoint, options = {}) {
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    const method = (options.method || 'GET').toUpperCase();
-
-    if (endpoint === API_ENDPOINTS.HEALTH) {
-      return {
-        status: 'ok',
-        version: '0.1.0-mock',
-        service: 'SplitMate Mock Service',
-      };
-    }
-
-    if (endpoint === API_ENDPOINTS.AUTH.CURRENT_USER) {
-      return MOCK_USERS[0];
-    }
-
-    // Groups
-    if (endpoint.startsWith('/groups')) {
-      if (method === 'GET') {
-        if (endpoint.includes('/members')) {
-          return MOCK_USERS.map((user) => ({
-            id: user.id,
-            name: user.name,
-            email: user.email,
-          }));
-        }
-        return MOCK_GROUPS;
-      }
-
-      if (method === 'POST') {
-        const body = JSON.parse(options.body || '{}');
-
-        if (endpoint.includes('/members')) {
-          return {
-            id: `mbr_${Date.now()}`,
-            name: body.name || 'Member',
-            email: body.email || 'member@example.com',
-            created_at: new Date().toISOString(),
-          };
-        }
-
-        return {
-          id: `grp_${Date.now()}`,
-          name: body.name || 'New Squad',
-          created_at: new Date().toISOString(),
-          members: MOCK_USERS.map((user) => ({
-            userId: user.id,
-            role: 'Member',
-          })),
-        };
-      }
-    }
-
-    // Expenses
-    if (endpoint.startsWith('/expenses')) {
-      if (method === 'GET') {
-        if (endpoint.includes('/splits')) {
-          return {
-            expense_id: 'exp_mock_1',
-            total_amount: 85.70,
-            currency: 'USD',
-            splits: MOCK_USERS.map((user) => ({
-              member_id: user.id,
-              member_name: user.name,
-              member_email: user.email,
-              allocated_subtotal: 15.70,
-              allocated_tax: 1.44,
-              amount: 17.14,
-              currency: 'USD',
-            })),
-          };
-        }
-
-        return MOCK_EXPENSES;
-      }
-
-      if (method === 'POST') {
-        const body = JSON.parse(options.body || '{}');
-
-        if (endpoint.includes('/assign')) {
-          return body.assignments || [];
-        }
-
-        if (endpoint.includes('/initialize-payments')) {
-          return MOCK_USERS.map((user) => ({
-            id: `pay_${Date.now()}_${user.id}`,
-            expense_id: `exp_${Date.now()}`,
-            member_id: user.id,
-            amount: 17.14,
-            currency: 'USD',
-            paypal_order_id: null,
-            paypal_capture_id: null,
-            status: 'pending',
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          }));
-        }
-
-        return {
-          id: `exp_${Date.now()}`,
-          group_id: body.group_id || 'grp_mock',
-          receipt_id: body.receipt_id || null,
-          total_amount: body.total_amount || 85.70,
-          currency: body.currency || 'USD',
-          created_at: new Date().toISOString(),
-        };
-      }
-    }
-
-    // Receipt endpoints must never return fabricated receipt data.
-    if (endpoint.startsWith('/receipts')) {
-      throw new Error(
-        'Unable to connect to the receipt extraction service. Please ensure the backend server is running.'
-      );
-    }
-
-    // PayPal Sandbox mock response. Keep the field names expected by ExpenseContext.
-    if (endpoint.includes('/create-order')) {
-      const body = JSON.parse(options.body || '{}');
-
-      return {
-        id: `pay_${Date.now()}`,
-        paypal_order_id: `MOCK-ORD-${Math.random()
-          .toString(36)
-          .substring(2, 10)
-          .toUpperCase()}`,
-        status: 'order_created',
-        amount: body.amount || 25.00,
-        currency: body.currency || 'USD',
-      };
-    }
-
-    if (endpoint.includes('/capture')) {
-      return {
-        id: `pay_${Date.now()}`,
-        paypal_order_id: 'MOCK-ORD-SUCCESS',
-        paypal_capture_id: `MOCK-CAP-${Math.random()
-          .toString(36)
-          .substring(2, 10)
-          .toUpperCase()}`,
-        status: 'captured',
-        amount: 25.00,
-        currency: 'USD',
-      };
-    }
-
-    if (endpoint.startsWith('/payments')) {
-      return [];
-    }
-
+// Categorise the error message to pick the right icon and contextual advice
+function classifyError(errorMsg) {
+  const msg = (errorMsg || '').toLowerCase();
+  if (
+    msg.includes('unable to connect') ||
+    msg.includes('unreachable') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('econnrefused')
+  ) {
     return {
-      ok: true,
-      message: 'Simulated fallback response',
+      icon: WifiOff,
+      title: 'Backend Service Offline',
+      advice:
+        'The SplitMate backend server is not reachable at http://localhost:8000. Ask Tanishq to start the FastAPI server, then retry.',
+      color: 'amber',
     };
   }
+  if (
+    msg.includes('not appear to contain') ||
+    msg.includes('not a receipt') ||
+    msg.includes('invalid image')
+  ) {
+    return {
+      icon: AlertTriangle,
+      title: 'Not a Valid Receipt',
+      advice:
+        'The uploaded image does not appear to be a receipt. Please upload a clear photo of a restaurant bill, store receipt, or invoice.',
+      color: 'orange',
+    };
+  }
+  if (msg.includes('blur') || msg.includes('quality')) {
+    return {
+      icon: AlertTriangle,
+      title: 'Image Too Blurry',
+      advice:
+        'The receipt image is unclear. Please take a fresh, well-lit photo and try again.',
+      color: 'orange',
+    };
+  }
+  if (msg.includes('too large') || msg.includes('413')) {
+    return {
+      icon: AlertTriangle,
+      title: 'File Too Large',
+      advice:
+        'The file exceeds the 10 MB limit. Compress or resize the image and try again.',
+      color: 'orange',
+    };
+  }
+  return {
+    icon: ServerCrash,
+    title: 'Extraction Failed',
+    advice:
+      'An unexpected error occurred during extraction. Please try again, or contact Pawan if the problem persists.',
+    color: 'rose',
+  };
 }
 
-export const apiClient = new ApiClient();
+export default function ReceiptScanView({ onNavigate }) {
+  const { receiptScan, resetReceiptScan, processReceiptFile } = useExpenses();
+  const {
+    icon: ErrorIcon,
+    title: errorTitle,
+    advice: errorAdvice,
+    color: errorColor,
+  } = classifyError(receiptScan.error);
+
+  const colorMap = {
+    amber: {
+      card: 'border-amber-200 dark:border-amber-900/60',
+      icon: 'bg-amber-50 dark:bg-amber-950/60 text-amber-600',
+      title: 'text-slate-900 dark:text-white',
+      msg: 'text-amber-700 dark:text-amber-400',
+      advice: 'text-slate-500 dark:text-slate-400',
+    },
+    orange: {
+      card: 'border-orange-200 dark:border-orange-900/60',
+      icon: 'bg-orange-50 dark:bg-orange-950/60 text-orange-600',
+      title: 'text-slate-900 dark:text-white',
+      msg: 'text-orange-700 dark:text-orange-400',
+      advice: 'text-slate-500 dark:text-slate-400',
+    },
+    rose: {
+      card: 'border-rose-200 dark:border-rose-900/60',
+      icon: 'bg-rose-50 dark:bg-rose-950/60 text-rose-600',
+      title: 'text-slate-900 dark:text-white',
+      msg: 'text-rose-700 dark:text-rose-400',
+      advice: 'text-slate-500 dark:text-slate-400',
+    },
+  };
+  const c = colorMap[errorColor] || colorMap.rose;
+
+  return (
+    <div className="space-y-6 animate-in fade-in duration-150">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+              AI Receipt Extraction & Itemized Splitting
+            </h2>
+            <Badge variant="purple" size="sm">
+              <Sparkles className="w-3 h-3" />
+              SplitMate Vision AI
+            </Badge>
+          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Extracts line items, dishes, tax, and totals automatically using computer vision OCR
+          </p>
+        </div>
+
+        {receiptScan.status === 'review' && (
+          <Button
+            variant="outline"
+            size="sm"
+            icon={RotateCcw}
+            onClick={resetReceiptScan}
+          >
+            Scan Another Receipt
+          </Button>
+        )}
+      </div>
+
+      {/* IDLE / UPLOADING / PROCESSING: Show Uploader */}
+      {(receiptScan.status === 'idle' ||
+        receiptScan.status === 'uploading' ||
+        receiptScan.status === 'processing') && (
+        <ReceiptUploader />
+      )}
+
+      {/* PENDING: AI service is working, polling timed out waiting for backend callback */}
+      {receiptScan.status === 'pending' && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 border border-blue-200 dark:border-blue-900/60 text-center max-w-lg mx-auto space-y-4">
+          <div className="w-14 h-14 rounded-full bg-blue-50 dark:bg-blue-950/60 text-blue-600 mx-auto flex items-center justify-center">
+            <Clock className="w-7 h-7 animate-pulse" />
+          </div>
+          <h3 className="text-base font-bold text-slate-900 dark:text-white">
+            AI Extraction In Progress
+          </h3>
+          <p className="text-sm text-slate-600 dark:text-slate-400">
+            Your receipt was uploaded successfully. SplitMate's AI vision service is processing it — this usually takes under 30 seconds.
+          </p>
+          <p className="text-xs text-blue-600 dark:text-blue-400 font-mono">
+            Receipt ID: {receiptScan.receiptId}
+          </p>
+          <div className="flex items-center justify-center gap-3 pt-2">
+            <Button
+              variant="primary"
+              size="md"
+              icon={RotateCcw}
+              onClick={() => receiptScan.file && processReceiptFile(receiptScan.file)}
+            >
+              Check Again
+            </Button>
+            <Button
+              variant="ghost"
+              size="md"
+              icon={UploadCloud}
+              onClick={resetReceiptScan}
+            >
+              Upload Different Receipt
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* REVIEW: Show 2-Column Split Interface */}
+      {receiptScan.status === 'review' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Left Column: Receipt Image & Structured Paper Preview */}
+          <div className="lg:col-span-5 space-y-6">
+            <ReceiptPreview
+              previewUrl={receiptScan.previewUrl}
+              extractedData={receiptScan.extractedData}
+              confidence={receiptScan.confidence}
+            />
+          </div>
+
+          {/* Right Column: AI Extraction Verification & Member Item Assignment */}
+          <div className="lg:col-span-7 space-y-6">
+            <ExtractionResult />
+            <ItemSplitAssignment
+              onFinalized={() => onNavigate('groups')}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ERROR: Professional error UI with contextual advice + retry options */}
+      {receiptScan.status === 'error' && (
+        <div className={`bg-white dark:bg-slate-900 rounded-2xl p-8 border ${c.card} max-w-lg mx-auto space-y-5`}>
+          {/* Icon */}
+          <div className={`w-14 h-14 rounded-full ${c.icon} mx-auto flex items-center justify-center`}>
+            <ErrorIcon className="w-7 h-7" />
+          </div>
+
+          {/* Title */}
+          <div className="text-center space-y-2">
+            <h3 className={`text-base font-bold ${c.title}`}>
+              {errorTitle}
+            </h3>
+            <p className={`text-sm font-medium ${c.msg}`}>
+              {receiptScan.error}
+            </p>
+            <p className={`text-xs leading-relaxed ${c.advice}`}>
+              {errorAdvice}
+            </p>
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+            {/* Retry re-runs the same file through processReceiptFile */}
+            {receiptScan.file && (
+              <Button
+                variant="primary"
+                size="md"
+                icon={RotateCcw}
+                onClick={() => processReceiptFile(receiptScan.file)}
+              >
+                Retry Extraction
+              </Button>
+            )}
+            <Button
+              variant={receiptScan.file ? 'outline' : 'primary'}
+              size="md"
+              icon={UploadCloud}
+              onClick={resetReceiptScan}
+            >
+              Upload Different Receipt
+            </Button>
+          </div>
+
+          {/* Backend status hint when offline */}
+          {(receiptScan.error || '').toLowerCase().includes('connect') && (
+            <div className="bg-slate-50 dark:bg-slate-800/60 rounded-xl p-3 text-xs text-slate-500 dark:text-slate-400 font-mono text-center space-y-1">
+              <p className="font-semibold text-slate-700 dark:text-slate-300">Backend Startup Commands</p>
+              <p>cd SplitMate/backend</p>
+              <p>uvicorn app.main:app --reload --host 0.0.0.0 --port 8000</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

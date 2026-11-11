@@ -145,10 +145,11 @@ def _extract_and_populate_receipt(receipt: Receipt, db: Session) -> Receipt:
         db.delete(old_item)
 
     for item_data in items_to_create:
+        qty = int(item_data.quantity) if item_data.quantity is not None else 1
         item = ReceiptItem(
             receipt_id=receipt.id,
             item_name=item_data.item_name,
-            quantity=item_data.quantity,
+            quantity=qty,
             unit_price=item_data.unit_price,
             total_price=item_data.total_price,
         )
@@ -361,14 +362,15 @@ def update_receipt_items(
 
     calculated_subtotal = Decimal("0.00")
     for item_data in body.items:
+        qty = int(item_data.quantity) if item_data.quantity is not None else 1
         unit_price = item_data.unit_price
-        total_price = item_data.total_price or (unit_price * item_data.quantity)
+        total_price = item_data.total_price or (unit_price * qty)
         calculated_subtotal += total_price
 
         item = ReceiptItem(
             receipt_id=receipt.id,
             item_name=item_data.item_name,
-            quantity=item_data.quantity,
+            quantity=qty,
             unit_price=unit_price,
             total_price=total_price,
         )
@@ -417,10 +419,11 @@ def submit_extraction(
         db.delete(old_item)
 
     for item_data in body.items:
+        qty = int(item_data.quantity) if item_data.quantity is not None else 1
         item = ReceiptItem(
             receipt_id=receipt.id,
             item_name=item_data.item_name,
-            quantity=item_data.quantity,
+            quantity=qty,
             unit_price=item_data.unit_price,
             total_price=item_data.total_price,
         )

@@ -2,6 +2,11 @@
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+import sqlite3
+from decimal import Decimal
+
+# Register SQLite adapter for Decimal to ensure seamless SQLite and PostgreSQL compatibility
+sqlite3.register_adapter(Decimal, lambda d: float(d))
 
 from app.core.config import settings
 
