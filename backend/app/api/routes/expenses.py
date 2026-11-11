@@ -4,6 +4,7 @@ import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -37,6 +38,35 @@ from app.services.authorization import (
 from app.services.split_calculator import calculate_splits_for_expense, is_expense_fully_assigned
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
+
+
+@router.get(
+    "",
+    response_model=list[ExpenseResponse],
+    summary="List all expenses for groups the current user belongs to",
+)
+def list_my_expenses(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Get all groups user belongs to
+    normalized_email = current_user.email.strip().lower()
+    user_groups = (
+        db.query(ExpenseGroup)
+        .outerjoin(GroupMember, ExpenseGroup.id == GroupMember.group_id)
+        .filter(
+            (ExpenseGroup.creator_id == current_user.id)
+            | (GroupMember.user_id == current_user.id)
+            | (func.lower(GroupMember.email) == normalized_email)
+        )
+        .distinct()
+        .all()
+    )
+    group_ids = [g.id for g in user_groups]
+
+    # Get all expenses for those groups
+    expenses = db.query(Expense).filter(Expense.group_id.in_(group_ids)).order_by(Expense.created_at.desc()).all()
+    return expenses
 
 
 @router.post(

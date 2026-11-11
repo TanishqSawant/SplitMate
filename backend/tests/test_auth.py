@@ -191,3 +191,47 @@ def test_password_hash_never_exposed(unauth_client):
     )
     assert "password_hash" not in me.text
 
+
+def test_production_rejects_missing_or_insecure_jwt_secret():
+    """In production environment, missing or default JWT secrets must be rejected."""
+    import pytest
+    from app.core.config import Settings
+
+    # Missing / empty secret
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY must be explicitly configured"):
+        Settings(APP_ENV="production", JWT_SECRET_KEY="")
+
+    # Insecure default dev secret
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY must be explicitly configured"):
+        Settings(
+            APP_ENV="production",
+            JWT_SECRET_KEY="dev-insecure-jwt-secret-key-not-for-production",
+        )
+
+    # Secret shorter than 32 characters
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY must be explicitly configured"):
+        Settings(APP_ENV="production", JWT_SECRET_KEY="short-secret-1234")
+
+
+def test_production_accepts_strong_jwt_secret():
+    """In production environment, a strong 32+ character secret is accepted."""
+    from app.core.config import Settings
+
+    strong_secret = "a-very-strong-production-secret-key-that-is-at-least-32-chars!"
+    cfg = Settings(APP_ENV="production", JWT_SECRET_KEY=strong_secret)
+    assert cfg.JWT_SECRET_KEY == strong_secret
+
+
+def test_development_uses_documented_insecure_key(monkeypatch):
+    """In development, a clearly marked dev-only default key is used if unset."""
+    from app.core.config import Settings
+
+    monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+
+    cfg = Settings(
+        APP_ENV="development",
+        _env_file=None,
+    )
+
+    assert cfg.JWT_SECRET_KEY == "dev-insecure-jwt-secret-key-not-for-production"
+

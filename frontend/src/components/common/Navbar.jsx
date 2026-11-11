@@ -18,7 +18,7 @@ import { apiClient } from '../../api/client';
 import Badge from './Badge';
 
 export default function Navbar({ onToggleSidebar, isSidebarOpen, onNavigate }) {
-  const { currentUser, allUsers, switchUser } = useAuth();
+  const { currentUser, allUsers, switchUser, logout } = useAuth();
   const { theme, toggleTheme, isDark } = useTheme();
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [backendStatus, setBackendStatus] = useState({ isOnline: null, baseURL: apiClient.baseURL });
@@ -198,6 +198,18 @@ export default function Navbar({ onToggleSidebar, isSidebarOpen, onNavigate }) {
                       <CreditCard className="w-3.5 h-3.5 text-[#0070BA]" />
                       <span>{currentUser?.paypalEmail}</span>
                     </div>
+                  </div>
+
+                  <div className="px-3 pb-2 border-t border-slate-100 dark:border-slate-800">
+                    <button
+                      onClick={() => {
+                        setIsUserMenuOpen(false);
+                        logout();
+                      }}
+                      className="w-full px-3 py-2 mt-2 text-sm font-medium text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors text-left"
+                    >
+                      Sign Out
+                    </button>
                   </div>
                 </div>
               </>

@@ -18,10 +18,20 @@ export default function ReceiptPreview({ previewUrl, extractedData, confidence }
           Receipt Image & Preview
         </h4>
         <div className="flex items-center gap-2">
-          {confidence && (
+          {confidence != null && (
             <Badge variant="purple" size="sm">
               <Sparkles className="w-3 h-3" />
               {Math.round(confidence * 100)}% Confidence
+            </Badge>
+          )}
+          {extractedData?.extractionStatus === 'review_required' && (
+            <Badge variant="warning" size="sm">
+              Review Required
+            </Badge>
+          )}
+          {extractedData?.extractionStatus === 'completed' && (
+            <Badge variant="success" size="sm">
+              Completed
             </Badge>
           )}
           <button
@@ -62,32 +72,46 @@ export default function ReceiptPreview({ previewUrl, extractedData, confidence }
         <div className="receipt-paper p-4 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 font-mono text-xs space-y-2 text-slate-700 dark:text-slate-300">
           <div className="text-center pb-2 border-b border-dashed border-slate-300 dark:border-slate-700">
             <p className="font-bold text-sm tracking-wide text-slate-900 dark:text-white uppercase font-sans">
-              {extractedData.merchant || 'Merchant Receipt'}
+              {extractedData.merchant || <span className="text-amber-500 italic lowercase font-normal">Merchant not detected</span>}
             </p>
             <p className="text-[11px] text-slate-400 font-sans mt-0.5">
-              {extractedData.date} • {extractedData.category || 'General Expense'}
+              {extractedData.date || 'No date'} • {extractedData.currency ? `${extractedData.currency} currency` : <span className="text-amber-500 italic">Currency unknown</span>}
             </p>
           </div>
 
           <div className="flex justify-between pt-1">
             <span>Subtotal</span>
-            <span>${(extractedData.subtotal || 0).toFixed(2)}</span>
+            <span>
+              {extractedData.subtotal != null
+                ? `${extractedData.currency ? extractedData.currency + ' ' : ''}${Number(extractedData.subtotal).toFixed(2)}`
+                : <span className="text-slate-400 italic">Not detected</span>}
+            </span>
           </div>
 
           <div className="flex justify-between">
             <span>Sales Tax</span>
-            <span>${(extractedData.tax || 0).toFixed(2)}</span>
+            <span>
+              {extractedData.tax != null
+                ? `${extractedData.currency ? extractedData.currency + ' ' : ''}${Number(extractedData.tax).toFixed(2)}`
+                : <span className="text-slate-400 italic">Not detected</span>}
+            </span>
           </div>
 
           <div className="flex justify-between">
             <span>Gratuity / Tip</span>
-            <span>${(extractedData.tip || 0).toFixed(2)}</span>
+            <span>
+              {extractedData.tip != null
+                ? `${extractedData.currency ? extractedData.currency + ' ' : ''}${Number(extractedData.tip).toFixed(2)}`
+                : <span className="text-slate-400 italic">None</span>}
+            </span>
           </div>
 
           <div className="flex justify-between pt-2 border-t border-dashed border-slate-300 dark:border-slate-700 font-bold text-sm text-slate-900 dark:text-white">
             <span>TOTAL AMOUNT</span>
-            <span className="text-blue-600 dark:text-blue-400">
-              ${(extractedData.total || 0).toFixed(2)} {extractedData.currency || 'USD'}
+            <span className={extractedData.total != null ? "text-blue-600 dark:text-blue-400" : "text-amber-500"}>
+              {extractedData.total != null
+                ? `${extractedData.currency ? extractedData.currency + ' ' : ''}${Number(extractedData.total).toFixed(2)}`
+                : <span className="text-amber-500 text-xs italic font-normal">Missing total (Review required)</span>}
             </span>
           </div>
         </div>

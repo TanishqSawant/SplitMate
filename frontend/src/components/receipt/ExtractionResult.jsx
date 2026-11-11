@@ -1,9 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   CheckCircle2,
   Trash2,
   Plus,
-  Users
+  Users,
+  AlertCircle,
+  Sparkles,
+  Save,
+  HelpCircle
 } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import { useAuth } from '../../context/AuthContext';
@@ -15,23 +19,34 @@ export default function ExtractionResult() {
     receiptScan,
     updateItemAssignment,
     updateReceiptMetadata,
+    submitReceiptReview,
     activeGroup,
   } = useExpenses();
   const { allUsers } = useAuth();
 
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [reviewError, setReviewError] = useState(null);
+  const [reviewSuccess, setReviewSuccess] = useState(false);
+
   const data = receiptScan.extractedData;
   if (!data) return null;
 
+  const isReviewRequired = receiptScan.extractionStatus === 'review_required' || data.extractionStatus === 'review_required';
+  const isCompleted = receiptScan.extractionStatus === 'completed' || data.extractionStatus === 'completed';
+
   // Available group members for assignment
   const groupMembers = activeGroup?.members
-    ? activeGroup.members.map((m) => allUsers.find((u) => u.id === m.userId)).filter(Boolean)
+    ? activeGroup.members.map((m) => {
+        // Handle both mock structure (userId) and backend structure (user_id)
+        const uid = m.userId || m.user_id;
+        return allUsers.find((u) => u.id === uid);
+      }).filter(Boolean)
     : allUsers;
 
   const handleToggleMember = (itemId, userId, currentAssigned) => {
     let newAssigned;
     if (currentAssigned.includes(userId)) {
       newAssigned = currentAssigned.filter((id) => id !== userId);
-      // ensure at least 1 person or allow empty
     } else {
       newAssigned = [...currentAssigned, userId];
     }
@@ -48,11 +63,12 @@ export default function ExtractionResult() {
       id: `item_${Date.now()}`,
       name: 'New Custom Item',
       quantity: 1,
+      unit_price: 10.00,
       price: 10.00,
       assignedTo: groupMembers.map((m) => m.id),
     };
     const updatedItems = [...data.items, newItem];
-    const newSubtotal = updatedItems.reduce((sum, it) => sum + it.price, 0);
+    const newSubtotal = updatedItems.reduce((sum, it) => sum + (it.price != null ? it.price : 0), 0);
     const newTotal = newSubtotal + (data.tax || 0) + (data.tip || 0);
 
     updateReceiptMetadata('items', updatedItems);
@@ -62,12 +78,26 @@ export default function ExtractionResult() {
 
   const handleDeleteItem = (itemId) => {
     const updatedItems = data.items.filter((it) => it.id !== itemId);
-    const newSubtotal = updatedItems.reduce((sum, it) => sum + it.price, 0);
+    const newSubtotal = updatedItems.reduce((sum, it) => sum + (it.price != null ? it.price : 0), 0);
     const newTotal = newSubtotal + (data.tax || 0) + (data.tip || 0);
 
     updateReceiptMetadata('items', updatedItems);
     updateReceiptMetadata('subtotal', newSubtotal);
     updateReceiptMetadata('total', newTotal);
+  };
+
+  const handleSubmitReview = async () => {
+    setReviewError(null);
+    setReviewSuccess(false);
+    setIsSubmittingReview(true);
+    try {
+      await submitReceiptReview();
+      setReviewSuccess(true);
+    } catch (err) {
+      setReviewError(err.message || 'Failed to submit review corrections.');
+    } finally {
+      setIsSubmittingReview(false);
+    }
   };
 
   return (
@@ -79,10 +109,18 @@ export default function ExtractionResult() {
             <h3 className="text-base font-bold text-slate-900 dark:text-white">
               AI Extracted Line Items
             </h3>
-            <Badge variant="success" size="sm">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              Verified by AI
-            </Badge>
+            {isCompleted && (
+              <Badge variant="success" size="sm">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {data.isUserReviewed ? 'Reviewed & Completed' : 'Verified by AI'}
+              </Badge>
+            )}
+            {isReviewRequired && (
+              <Badge variant="warning" size="sm">
+                <AlertCircle className="w-3.5 h-3.5" />
+                Review Required
+              </Badge>
+            )}
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
             Tap member avatars to assign individual dishes and items. Tax and tip are pro-rated automatically.
@@ -99,17 +137,81 @@ export default function ExtractionResult() {
         </Button>
       </div>
 
-      {/* Editable Merchant Metadata Fields */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      {/* Review Required Alert Banner */}
+      {isReviewRequired && (
+        <div className="p-4 rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/30 text-amber-900 dark:text-amber-200 space-y-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+            <h4 className="text-xs font-bold uppercase tracking-wider">
+              Human Review & Verification Required
+            </h4>
+          </div>
+          <p className="text-xs text-slate-600 dark:text-slate-300">
+            The AI model identified missing or uncertain values. Please review merchant details, currency (3-letter ISO), total, and line items, then submit your corrections to finalize extraction.
+          </p>
+          {receiptScan.warnings && receiptScan.warnings.length > 0 && (
+            <div className="pt-1 border-t border-amber-200/60 dark:border-amber-900/40">
+              <p className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">Model Warnings:</p>
+              <ul className="list-disc list-inside text-[11px] text-amber-700 dark:text-amber-400">
+                {receiptScan.warnings.map((w, idx) => (
+                  <li key={idx}>{w}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {data.uncertainFields && data.uncertainFields.length > 0 && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-400">
+              Uncertain fields: {data.uncertainFields.join(', ')}
+            </p>
+          )}
+          {data.missingFields && data.missingFields.length > 0 && (
+            <p className="text-[11px] text-amber-700 dark:text-amber-400">
+              Missing fields: {data.missingFields.join(', ')}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Review Feedback Alerts */}
+      {reviewError && (
+        <div className="p-3 rounded-xl border border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 text-xs text-rose-700 dark:text-rose-300 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+          <span>{reviewError}</span>
+        </div>
+      )}
+      {reviewSuccess && (
+        <div className="p-3 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950/40 text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+          <span>Review corrections submitted successfully! Receipt extraction is now complete.</span>
+        </div>
+      )}
+
+      {/* Editable Receipt Metadata Fields */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
         <div>
           <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">
             Merchant Name
           </label>
           <input
             type="text"
-            value={data.merchant || ''}
-            onChange={(e) => updateReceiptMetadata('merchant', e.target.value)}
+            placeholder="Merchant not detected"
+            value={data.merchant ?? ''}
+            onChange={(e) => updateReceiptMetadata('merchant', e.target.value || null)}
             className="w-full px-3 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+
+        <div>
+          <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">
+            Currency (3-Letter ISO)
+          </label>
+          <input
+            type="text"
+            maxLength={3}
+            placeholder="e.g. USD, EUR"
+            value={data.currency ?? ''}
+            onChange={(e) => updateReceiptMetadata('currency', e.target.value ? e.target.value.toUpperCase() : null)}
+            className="w-full px-3 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-900 dark:text-white uppercase font-mono focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
@@ -119,43 +221,47 @@ export default function ExtractionResult() {
           </label>
           <input
             type="date"
-            value={data.date || ''}
-            onChange={(e) => updateReceiptMetadata('date', e.target.value)}
+            value={data.date ?? ''}
+            onChange={(e) => updateReceiptMetadata('date', e.target.value || null)}
             className="w-full px-3 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
         <div>
           <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">
-            Sales Tax ($)
+            Sales Tax
           </label>
           <input
             type="number"
             step="0.01"
+            placeholder="—"
             value={data.tax ?? ''}
             onChange={(e) => {
-              const val = parseFloat(e.target.value) || 0;
+              const val = e.target.value !== '' ? parseFloat(e.target.value) : null;
               updateReceiptMetadata('tax', val);
-              updateReceiptMetadata('total', (data.subtotal || 0) + val + (data.tip || 0));
             }}
-            className="w-full px-3 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-900 dark:text-white font-mono focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
         <div>
           <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-1">
-            Tip / Gratuity ($)
+            Final Total
           </label>
           <input
             type="number"
             step="0.01"
-            value={data.tip ?? ''}
+            placeholder="—"
+            value={data.total ?? ''}
             onChange={(e) => {
-              const val = parseFloat(e.target.value) || 0;
-              updateReceiptMetadata('tip', val);
-              updateReceiptMetadata('total', (data.subtotal || 0) + (data.tax || 0) + val);
+              const val = e.target.value !== '' ? parseFloat(e.target.value) : null;
+              updateReceiptMetadata('total', val);
             }}
-            className="w-full px-3 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+            className={`w-full px-3 py-2 text-xs font-bold rounded-xl border font-mono focus:ring-2 focus:ring-blue-500 ${
+              data.total != null
+                ? 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 text-slate-900 dark:text-white'
+                : 'border-amber-300 dark:border-amber-700 bg-amber-50/50 dark:bg-amber-950/20 text-amber-600'
+            }`}
           />
         </div>
       </div>
@@ -164,7 +270,7 @@ export default function ExtractionResult() {
       <div className="space-y-3">
         {data.items.map((item, index) => {
           const assigned = item.assignedTo || [];
-          const splitAmount = assigned.length > 0 ? item.price / assigned.length : item.price;
+          const splitAmount = item.price != null && assigned.length > 0 ? item.price / assigned.length : item.price;
 
           return (
             <div
@@ -179,6 +285,7 @@ export default function ExtractionResult() {
                   <input
                     type="text"
                     value={item.name}
+                    placeholder="Item name"
                     onChange={(e) => {
                       const updated = data.items.map((it) =>
                         it.id === item.id ? { ...it, name: e.target.value } : it
@@ -194,35 +301,36 @@ export default function ExtractionResult() {
                     <span>Qty:</span>
                     <input
                       type="number"
-                      min="1"
-                      value={item.quantity}
+                      step="any"
+                      min="0.01"
+                      placeholder="—"
+                      value={item.quantity ?? ''}
                       onChange={(e) => {
+                        const val = e.target.value !== '' ? parseFloat(e.target.value) : null;
                         const updated = data.items.map((it) =>
-                          it.id === item.id ? { ...it, quantity: parseInt(e.target.value) || 1 } : it
+                          it.id === item.id ? { ...it, quantity: val } : it
                         );
                         updateReceiptMetadata('items', updated);
                       }}
-                      className="w-12 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-center"
+                      className="w-14 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-center font-mono text-xs"
                     />
                   </div>
 
                   <div className="flex items-center gap-1 font-mono text-sm font-bold text-slate-900 dark:text-white">
-                    <span>$</span>
+                    <span className="text-xs text-slate-400">{data.currency || ''}</span>
                     <input
                       type="number"
                       step="0.01"
-                      value={item.price}
+                      placeholder="—"
+                      value={item.price ?? ''}
                       onChange={(e) => {
-                        const newPrice = parseFloat(e.target.value) || 0;
+                        const val = e.target.value !== '' ? parseFloat(e.target.value) : null;
                         const updated = data.items.map((it) =>
-                          it.id === item.id ? { ...it, price: newPrice } : it
+                          it.id === item.id ? { ...it, price: val } : it
                         );
-                        const newSub = updated.reduce((s, it) => s + it.price, 0);
                         updateReceiptMetadata('items', updated);
-                        updateReceiptMetadata('subtotal', newSub);
-                        updateReceiptMetadata('total', newSub + (data.tax || 0) + (data.tip || 0));
                       }}
-                      className="w-20 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right"
+                      className="w-24 px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-right font-mono"
                     />
                   </div>
 
@@ -256,6 +364,7 @@ export default function ExtractionResult() {
                     return (
                       <button
                         key={member.id}
+                        type="button"
                         onClick={() => handleToggleMember(item.id, member.id, assigned)}
                         className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-all ${
                           isAssigned
@@ -276,9 +385,13 @@ export default function ExtractionResult() {
 
                 <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
                   {assigned.length > 0 ? (
-                    <span>
-                      ${splitAmount.toFixed(2)} / person ({assigned.length})
-                    </span>
+                    splitAmount != null ? (
+                      <span>
+                        {data.currency ? `${data.currency} ` : '$'}{splitAmount.toFixed(2)} / person ({assigned.length})
+                      </span>
+                    ) : (
+                      <span className="text-amber-500 italic">Unpriced item</span>
+                    )
                   ) : (
                     <span className="text-amber-500 font-medium">Unassigned</span>
                   )}
@@ -288,6 +401,31 @@ export default function ExtractionResult() {
           );
         })}
       </div>
+
+      {/* Review Submission Action Bar (only when review is required) */}
+      {isReviewRequired && (
+        <div className="p-4 rounded-xl border border-amber-300 dark:border-amber-800/80 bg-gradient-to-r from-amber-50/90 to-orange-50/90 dark:from-amber-950/40 dark:to-orange-950/40 flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs">
+          <div>
+            <p className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+              <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+              Human Review Corrections Ready
+            </p>
+            <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5">
+              Submit confirmed merchant, currency, and line items to the backend review gate to complete extraction.
+            </p>
+          </div>
+          <Button
+            variant="primary"
+            size="md"
+            icon={CheckCircle2}
+            isLoading={isSubmittingReview}
+            onClick={handleSubmitReview}
+            className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white font-semibold"
+          >
+            Submit Review Corrections
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

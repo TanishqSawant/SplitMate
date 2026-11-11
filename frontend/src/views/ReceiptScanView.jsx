@@ -9,11 +9,10 @@ import Button from '../components/common/Button';
 import Badge from '../components/common/Badge';
 
 export default function ReceiptScanView({ onNavigate }) {
-  const { receiptScan, setReceiptScan } = useExpenses();
+  const { receiptScan, resetReceiptScan } = useExpenses();
 
   const handleReset = () => {
-    // Reset receipt scan state
-    window.location.reload(); // Simple clean reset or state clear
+    resetReceiptScan();
   };
 
   return (
@@ -40,7 +39,7 @@ export default function ReceiptScanView({ onNavigate }) {
             variant="outline"
             size="sm"
             icon={RotateCcw}
-            onClick={() => window.location.reload()}
+            onClick={resetReceiptScan}
           >
             Scan Another Receipt
           </Button>
@@ -92,9 +91,9 @@ export default function ReceiptScanView({ onNavigate }) {
             variant="primary"
             size="md"
             icon={RotateCcw}
-            onClick={() => window.location.reload()}
+            onClick={resetReceiptScan}
           >
-            Try Again with Sample Receipt
+            Upload Another Receipt
           </Button>
         </div>
       )}

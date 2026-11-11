@@ -12,6 +12,7 @@ import shutil
 from typing import Any
 from PIL import Image
 
+from app.core.config import settings
 from .schemas import ReceiptExtractionResult
 from .llm_parser import GeminiVisionExtractor, RegexHeuristicFallback
 
@@ -24,10 +25,14 @@ class OCREngine:
     def __init__(
         self,
         api_key: str | None = None,
+        model: str | None = None,
         preferred_engine: str = "gemini_vision",
     ):
+        self.api_key = api_key if api_key is not None else settings.GEMINI_API_KEY
+        self.model = model if model is not None else settings.GEMINI_MODEL
         self.preferred_engine = preferred_engine
-        self.gemini_extractor = GeminiVisionExtractor(api_key=api_key)
+        self.gemini_extractor = GeminiVisionExtractor(api_key=self.api_key, model=self.model)
+        # Retained temporarily for backward compatibility; not reachable in production extraction
         self.fallback_parser = RegexHeuristicFallback()
 
     @staticmethod
@@ -83,7 +88,8 @@ class OCREngine:
         if not ocr_text and has_local_ocr:
             ocr_text = self.extract_text_local_ocr(image)
 
-        # Primary route: Gemini Vision
+        # Primary and ONLY extraction route: Gemini Vision
+        # Local Tesseract text is only passed as supplemental text_context to Gemini
         if self.gemini_extractor.is_available():
             return self.gemini_extractor.extract(
                 image=image,
@@ -91,13 +97,16 @@ class OCREngine:
                 initial_warnings=warnings,
             )
 
-        # If Gemini is not configured, inform the user clearly
-        warnings.append("Gemini API key is not configured. Running in offline fallback mode.")
-        if not has_local_ocr:
-            warnings.append("Local Tesseract binary is not installed on this system.")
-
-        return self.fallback_parser.parse_text(
-            text=ocr_text,
-            initial_warnings=warnings,
+        # Missing Gemini API key produces a controlled failed extraction result.
+        # Local Tesseract text does NOT independently generate an extraction result.
+        warnings.append("Gemini API key is not configured.")
+        return ReceiptExtractionResult(
+            status="failed",
+            error_code="MISSING_API_KEY",
+            error_message="Gemini API key is not configured.",
+            confidence=None,
+            is_fallback=False,
+            extraction_method="gemini_vision",
+            warnings=warnings,
         )
 

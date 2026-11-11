@@ -11,8 +11,8 @@ Coordinates:
 
 from pathlib import Path
 from typing import BinaryIO
-import os
 
+from app.core.config import settings
 from .schemas import ReceiptExtractionResult
 from .preprocessor import ImagePreprocessor
 from .pdf_handler import PDFHandler
@@ -33,14 +33,16 @@ class ReceiptExtractionService:
     def __init__(
         self,
         api_key: str | None = None,
+        model: str | None = None,
         max_size_mb: int = DEFAULT_MAX_SIZE_MB,
         blur_threshold: float = ImagePreprocessor.BLUR_THRESHOLD,
     ):
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        self.api_key = api_key if api_key is not None else settings.GEMINI_API_KEY
+        self.model = model if model is not None else settings.GEMINI_MODEL
         self.max_size_bytes = max_size_mb * 1024 * 1024
         self.preprocessor = ImagePreprocessor(blur_threshold=blur_threshold)
         self.pdf_handler = PDFHandler()
-        self.ocr_engine = OCREngine(api_key=self.api_key)
+        self.ocr_engine = OCREngine(api_key=self.api_key, model=self.model)
 
     def validate_file(self, filename: str, file_size: int) -> str:
         """Validates filename extension and size bounds.
@@ -100,7 +102,8 @@ class ReceiptExtractionService:
                 embedded_text=embedded_text,
                 initial_warnings=warnings,
             )
-            result.validate_math_consistency()
+            if result.status != "failed":
+                result.validate_math_consistency()
             return result
 
         # ---------------------------------------------------------------------
@@ -119,7 +122,8 @@ class ReceiptExtractionService:
             embedded_text="",
             initial_warnings=warnings,
         )
-        result.validate_math_consistency()
+        if result.status != "failed":
+            result.validate_math_consistency()
         return result
 
     def extract_from_path(self, file_path: str | Path) -> ReceiptExtractionResult:

@@ -1,5 +1,6 @@
 """Application configuration loaded from environment variables."""
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -24,14 +25,35 @@ class Settings(BaseSettings):
     INTERNAL_SERVICE_SECRET: str = ""
 
     # JWT Authentication
-    JWT_SECRET_KEY: str = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
+    # In production, JWT_SECRET_KEY must be explicitly set to a strong secret (at least 32 characters).
+    # In development, an explicitly documented dev-only insecure key is used if unset.
+    JWT_SECRET_KEY: str = "dev-insecure-jwt-secret-key-not-for-production"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+
+    # Google Gemini AI Configuration
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # PayPal Sandbox (Tanay configures these)
     PAYPAL_CLIENT_ID: str = ""
     PAYPAL_CLIENT_SECRET: str = ""
     PAYPAL_BASE_URL: str = "https://api-m.sandbox.paypal.com"
+    PAYPAL_TIMEOUT_SECONDS: float = 10.0
+
+    @model_validator(mode="after")
+    def validate_production_security(self) -> "Settings":
+        if self.APP_ENV == "production":
+            if (
+                not self.JWT_SECRET_KEY
+                or len(self.JWT_SECRET_KEY) < 32
+                or self.JWT_SECRET_KEY.startswith("dev-insecure")
+            ):
+                raise ValueError(
+                    "JWT_SECRET_KEY must be explicitly configured with a strong, non-default secret "
+                    "(at least 32 characters) in production environment."
+                )
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

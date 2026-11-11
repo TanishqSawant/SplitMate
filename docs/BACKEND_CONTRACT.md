@@ -280,50 +280,97 @@ Dhruv owns the React + TypeScript + Vite frontend.
 ---
 
 #### 3. Receipts (Protected)
-- **`POST /api/receipts/upload`**
-  - **Content-Type:** `multipart/form-data`
-  - **Form Data:** `file`: Binary file (Accepted types: `.jpg`, `.jpeg`, `.png`, `.webp`, `.pdf`. Max size: 10 MB).
-  - **Response (`201 Created`):**
-    ```json
-    {
-      "id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
-      "original_filename": "dinner_bill.jpg",
-      "merchant_name": null,
-      "currency": "USD",
-      "subtotal": null,
-      "tax": null,
-      "total": null,
-      "extraction_status": "pending",
-      "created_at": "2026-11-07T17:15:00.000000Z",
-      "items": []
-    }
-    ```
 
-- **`GET /api/receipts/{receipt_id}`**
-  - **Response (`200 OK`):**
-    ```json
-    {
-      "id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
-      "original_filename": "dinner_bill.jpg",
-      "merchant_name": "Mario's Italian Bistro",
-      "currency": "USD",
-      "subtotal": 54.50,
-      "tax": 4.90,
-      "total": 59.40,
-      "extraction_status": "completed",
-      "created_at": "2026-11-07T17:15:00.000000Z",
-      "items": [
-        {
-          "id": "8a32a0c4-110a-48d6-95f0-6c9c6fbb3e60",
-          "receipt_id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
-          "item_name": "Margherita Pizza Large",
-          "quantity": 1,
-          "unit_price": 22.00,
-          "total_price": 22.00
-        }
-      ]
-    }
-    ```
+##### `POST /api/receipts/extract` (Asynchronous AI Extraction Flow)
+- **Auth:** `Authorization: Bearer <access_token>`
+- **Content-Type:** `multipart/form-data`
+- **Form Data:** `file`: Binary receipt image or PDF (Accepted: `.jpg`, `.jpeg`, `.png`, `.webp`, `.pdf`. Max size: 10 MB).
+- **Behavior:**
+  1. Validates magic bytes and stores file.
+  2. Creates `Receipt` record with status `pending`.
+  3. Commits transaction and schedules `process_receipt_extraction_task` via FastAPI `BackgroundTasks`.
+  4. Returns `HTTP 202 Accepted` immediately.
+- **Response (`202 Accepted`):**
+  ```json
+  {
+    "receipt_id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
+    "extraction_status": "pending"
+  }
+  ```
+
+##### `GET /api/receipts/{receipt_id}`
+- **Auth:** `Authorization: Bearer <access_token>` (Uploader or Group Member)
+- **Response (`200 OK`):**
+  ```json
+  {
+    "receipt_id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
+    "original_filename": "dinner_bill.jpg",
+    "merchant_name": "Mario's Italian Bistro",
+    "currency": "USD",
+    "subtotal": 54.50,
+    "tax": 4.90,
+    "total": 59.40,
+    "extraction_status": "completed",
+    "missing_fields": null,
+    "uncertain_fields": null,
+    "warnings": null,
+    "confidence": 0.95,
+    "error_code": null,
+    "error_message": null,
+    "is_user_reviewed": false,
+    "created_at": "2026-11-07T17:15:00.000000Z",
+    "items": [
+      {
+        "id": "8a32a0c4-110a-48d6-95f0-6c9c6fbb3e60",
+        "receipt_id": "e4b52c6f-612b-426b-8cf7-cb7dfc64c782",
+        "item_name": "Margherita Pizza Large",
+        "quantity": "1.0000",
+        "unit_price": 22.00,
+        "total_price": 22.00
+      }
+    ]
+  }
+  ```
+
+##### `PUT /api/receipts/{receipt_id}/review` (Human Review for `review_required`)
+- **Auth:** `Authorization: Bearer <access_token>` (Uploader or Group Member)
+- **Precondition:** `extraction_status` must be `"review_required"`. Otherwise returns `409 Conflict`.
+- **Request Body:**
+  ```json
+  {
+    "merchant_name": "Mario's Italian Bistro",
+    "currency": "USD",
+    "subtotal": 45.50,
+    "tax": 3.64,
+    "total": 49.14,
+    "items": [
+      {
+        "item_name": "Margherita Pizza",
+        "quantity": "2.0000",
+        "unit_price": 12.00,
+        "total_price": 24.00
+      },
+      {
+        "item_name": "Garlic Bread",
+        "quantity": "1.0000",
+        "unit_price": 21.50,
+        "total_price": 21.50
+      }
+    ]
+  }
+  ```
+- **Validation Rules:**
+  - `currency`: Valid 3-letter ISO code.
+  - `total`: Must be strictly positive.
+  - `items`: At least 1 item with positive quantity and non-negative prices.
+  - Item math: `quantity × unit_price` must equal `total_price` exactly (server-side exact decimal check).
+  - Financial reconciliation: **not enforced server-side** during human review. A receipt may legitimately contain uncaptured adjustments (tip, discount, service charge, delivery fee) that cause `subtotal + tax ≠ total`.
+- **Response (`200 OK`):** Updated `ReceiptResponse` with `extraction_status: "completed"` and `is_user_reviewed: true`.
+
+##### `POST /api/receipts/upload` (Direct Synchronous Storage)
+- **Content-Type:** `multipart/form-data`
+- **Form Data:** `file`: Binary file (Accepted: `.jpg`, `.jpeg`, `.png`, `.webp`, `.pdf`. Max size: 10 MB).
+- **Response (`201 Created`):** `ReceiptResponse` with `extraction_status: "pending"`.
 
 ---
 
@@ -522,21 +569,21 @@ PAYPAL_BASE_URL=https://api-m.sandbox.paypal.com
 #### 1. Create PayPal Order
 - **Endpoint:** `POST /api/payments/{payment_id}/create-order`
 - **Location:** `app/api/routes/payments.py -> create_paypal_order`
-- **Current State:** Returns `501 Not Implemented`.
+- **Current State:** Implemented via `app/services/paypal_service.py` (PayPal Orders API v2 with token caching, pessimistic row locking, and idempotency key support).
 - **Implementation Requirements:**
-  1. Verify `payment.status == PaymentStatus.PENDING`.
+  1. Verify `payment.status == PaymentStatus.PENDING` (or existing order returned idempotently).
   2. Request an OAuth2 access token from PayPal Sandbox (`POST /v1/oauth2/token`).
   3. Call PayPal Orders API (`POST /v2/checkout/orders`):
      - `intent`: `"CAPTURE"`
      - `purchase_units`: `[{ amount: { currency_code: payment.currency, value: str(payment.amount) } }]`
   4. Save returned PayPal order ID: `payment.paypal_order_id = response.id`.
   5. Update status: `payment.status = PaymentStatus.ORDER_CREATED`.
-  6. Commit transaction and return `PaymentResponse`.
+  6. Commit transaction and return `PaymentResponse` including `approval_url`.
 
 #### 2. Capture PayPal Payment
 - **Endpoint:** `POST /api/payments/{payment_id}/capture`
 - **Location:** `app/api/routes/payments.py -> capture_payment`
-- **Current State:** Returns `501 Not Implemented`.
+- **Current State:** Implemented via `app/services/paypal_service.py` (server-side capture verification, amount/currency validation, idempotent capture retry handling).
 - **Body:**
   ```json
   {
@@ -544,11 +591,11 @@ PAYPAL_BASE_URL=https://api-m.sandbox.paypal.com
   }
   ```
 - **Implementation Requirements:**
-  1. Verify `payment.status == PaymentStatus.ORDER_CREATED`.
-  2. Reject if `payment.status == PaymentStatus.CAPTURED` (prevent duplicate capture).
+  1. Verify `payment.status == PaymentStatus.ORDER_CREATED` (or return already captured payment idempotently).
+  2. Reject if `payment.status == PaymentStatus.CAPTURED` when an unexpected capture request is received.
   3. Validate `body.paypal_order_id == payment.paypal_order_id`.
   4. Call PayPal Capture endpoint (`POST /v2/checkout/orders/{order_id}/capture`).
-  5. **Server-Side Verification Requirement:** Never trust frontend confirmation. Inspect PayPal API response to confirm status is `"COMPLETED"`.
+  5. **Server-Side Verification Requirement:** Never trust frontend confirmation. Inspect PayPal API response to confirm status is `"COMPLETED"`, and verify captured amount and currency match database payment record.
   6. Save `payment.paypal_capture_id = capture_id`.
   7. Set `payment.status = PaymentStatus.CAPTURED`.
   8. If PayPal rejects the capture, set `payment.status = PaymentStatus.FAILED`.
@@ -623,7 +670,7 @@ Interactive API documentation:
 ```powershell
 pytest tests/ -v
 ```
-All 93 unit, integration, security, and extraction tests use SQLite in-memory fixtures and run cleanly without requiring an external PostgreSQL instance.
+All 188 unit, integration, security, extraction, and PayPal tests use SQLite in-memory fixtures and run cleanly without requiring an external PostgreSQL instance.
 
 ---
 

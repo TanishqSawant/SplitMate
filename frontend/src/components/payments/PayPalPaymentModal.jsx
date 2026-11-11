@@ -21,13 +21,21 @@ export default function PayPalPaymentModal() {
 
   if (!payPalModal.isOpen) return null;
 
-  const { payer, receiver, amount, currency, note, status, transactionId, error } = payPalModal;
+  const { payer, receiver, amount, currency, note, status, transactionId, error, paymentId } = payPalModal;
 
   const handleCopyId = () => {
     if (transactionId) {
       navigator.clipboard.writeText(transactionId);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleExecute = () => {
+    if (paymentId) {
+      executePayPalPayment(paymentId);
+    } else {
+      console.error('[SplitMate] No payment ID available');
     }
   };
 
@@ -102,8 +110,9 @@ export default function PayPalPaymentModal() {
 
             {/* Yellow PayPal Branded Button */}
             <button
-              onClick={executePayPalPayment}
-              className="w-full py-3.5 px-6 rounded-2xl bg-[#FFC439] hover:bg-[#F2BA36] text-[#003087] font-black text-base shadow-md hover:shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer"
+              onClick={handleExecute}
+              disabled={!paymentId}
+              className="w-full py-3.5 px-6 rounded-2xl bg-[#FFC439] hover:bg-[#F2BA36] text-[#003087] font-black text-base shadow-md hover:shadow-lg transition-all transform active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <span>Pay with</span>
               <span className="italic font-extrabold text-lg tracking-tight">PayPal</span>
@@ -208,7 +217,7 @@ export default function PayPalPaymentModal() {
               <Button variant="ghost" size="md" onClick={closePayPalModal} className="flex-1">
                 Cancel
               </Button>
-              <Button variant="paypal" size="md" onClick={executePayPalPayment} className="flex-1">
+              <Button variant="paypal" size="md" onClick={handleExecute} className="flex-1" disabled={!paymentId}>
                 Retry Payment
               </Button>
             </div>

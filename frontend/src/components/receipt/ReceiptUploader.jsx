@@ -32,7 +32,7 @@ export default function ReceiptUploader() {
     e.preventDefault();
     setIsDragging(false);
     const files = e.dataTransfer.files;
-    if (files.length > 0 && files[0].type.startsWith('image/')) {
+    if (files.length > 0 && (files[0].type.startsWith('image/') || files[0].type === 'application/pdf' || files[0].name.endsWith('.pdf'))) {
       processReceiptFile(files[0]);
     }
   };
@@ -61,7 +61,7 @@ export default function ReceiptUploader() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/png, image/jpeg, image/webp"
+          accept="image/png, image/jpeg, image/webp, application/pdf, .pdf"
           className="hidden"
           onChange={handleFileChange}
         />
@@ -75,7 +75,7 @@ export default function ReceiptUploader() {
             Upload or drop your receipt image
           </h3>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1 mb-4 leading-relaxed">
-            Supports JPG, PNG, and WebP up to 15MB. Pawan's vision AI model will instantly parse line items, tax, and totals.
+            Supports JPG, PNG, WebP, and PDF up to 15MB. Pawan's vision AI model will instantly parse line items, tax, and totals.
           </p>
 
           <div className="flex items-center gap-3">
