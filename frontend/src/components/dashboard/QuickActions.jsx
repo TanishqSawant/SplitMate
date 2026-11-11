@@ -2,8 +2,7 @@ import React from 'react';
 import {
   ScanLine,
   PlusCircle,
-  CreditCard,
-  UserPlus,
+  Users,
   Sparkles,
   Zap
 } from 'lucide-react';
@@ -13,7 +12,6 @@ export default function QuickActions({
   onScanReceipt,
   onAddExpense,
   onCreateGroup,
-  onSettlePayPal,
   onLoadSampleReceipt,
 }) {
   return (
@@ -60,6 +58,16 @@ export default function QuickActions({
             className="bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-xs"
           >
             Add Expense
+          </Button>
+
+          <Button
+            variant="primary"
+            size="lg"
+            icon={Users}
+            onClick={onCreateGroup}
+            className="bg-white/10 hover:bg-white/20 text-white border border-white/20 backdrop-blur-xs"
+          >
+            New Squad
           </Button>
 
           <Button

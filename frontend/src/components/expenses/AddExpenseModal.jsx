@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { PlusCircle, DollarSign, Users, Calendar, Tag } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import { useAuth } from '../../context/AuthContext';
 import Modal from '../common/Modal';
@@ -14,8 +13,8 @@ export default function AddExpenseModal({ isOpen, onClose }) {
   const [groupId, setGroupId] = useState(activeGroup?.id || groups[0]?.id);
   const [paidBy, setPaidBy] = useState(currentUser?.id);
   const [category, setCategory] = useState('Food & Dining');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-  const [splitType, setSplitType] = useState('EQUAL'); // 'EQUAL'
+  const [date, _setDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [splitType, _setSplitType] = useState('EQUAL'); // 'EQUAL'
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const selectedGroup = groups.find((g) => g.id === groupId) || groups[0];

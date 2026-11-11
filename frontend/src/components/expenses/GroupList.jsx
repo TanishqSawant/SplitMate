@@ -1,13 +1,5 @@
 import React from 'react';
-import {
-  Users,
-  Plus,
-  ArrowRight,
-  TrendingUp,
-  TrendingDown,
-  ShieldCheck,
-  FolderOpen
-} from 'lucide-react';
+import { Plus } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import { useAuth } from '../../context/AuthContext';
 import Button from '../common/Button';

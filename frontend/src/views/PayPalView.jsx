@@ -3,11 +3,6 @@ import {
   CreditCard,
   ShieldCheck,
   CheckCircle2,
-  Lock,
-  ArrowRight,
-  ExternalLink,
-  Copy,
-  Receipt,
   FileCheck
 } from 'lucide-react';
 import { useExpenses } from '../context/ExpenseContext';
@@ -29,11 +24,11 @@ export default function PayPalView() {
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div className="max-w-xl">
             <div className="flex items-center gap-2 mb-2">
-              <Badge variant="paypal" size="sm" className="bg-white text-[#003087]">
+              <Badge variant="paypal" size="sm" className="bg-white/95 text-[#003087] shadow-xs">
                 <ShieldCheck className="w-3.5 h-3.5" />
                 PayPal Sandbox Payments
               </Badge>
-              <span className="text-xs text-sky-100">Tanay's Integration Module</span>
+              <span className="text-xs text-sky-100 font-medium">Verified Instant Settlement</span>
             </div>
             <h2 className="text-2xl font-extrabold tracking-tight text-white">
               Instant Peer-to-Peer Balance Settlement

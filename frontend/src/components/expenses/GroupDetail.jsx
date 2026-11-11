@@ -3,14 +3,9 @@ import {
   Users,
   Plus,
   ScanLine,
-  CreditCard,
   Receipt,
-  Calendar,
-  CheckCircle2,
-  DollarSign,
   ArrowRight,
-  ShieldCheck,
-  UserCheck
+  ShieldCheck
 } from 'lucide-react';
 import { useExpenses } from '../../context/ExpenseContext';
 import { useAuth } from '../../context/AuthContext';
@@ -22,7 +17,7 @@ export default function GroupDetail({
   onScanReceipt,
   onSelectExpense,
 }) {
-  const { activeGroup, expenses, debtBreakdown, openPayPalPayment } = useExpenses();
+  const { activeGroup, expenses } = useExpenses();
   const { currentUser, allUsers } = useAuth();
   const [filter, setFilter] = useState('ALL'); // 'ALL' | 'MINE'
 

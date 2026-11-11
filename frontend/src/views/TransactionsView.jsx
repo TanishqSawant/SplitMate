@@ -1,13 +1,8 @@
 import React, { useState } from 'react';
 import {
-  Receipt,
   Search,
-  Filter,
-  ArrowUpDown,
   Sparkles,
-  Download,
-  Calendar,
-  CreditCard
+  Download
 } from 'lucide-react';
 import { useExpenses } from '../context/ExpenseContext';
 import { useAuth } from '../context/AuthContext';
@@ -16,7 +11,7 @@ import Button from '../components/common/Button';
 
 export default function TransactionsView({ onSelectExpense }) {
   const { expenses, groups } = useExpenses();
-  const { allUsers, currentUser } = useAuth();
+  const { allUsers } = useAuth();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterType, setFilterType] = useState('ALL'); // 'ALL' | 'AI' | 'EQUAL'
@@ -136,7 +131,19 @@ export default function TransactionsView({ onSelectExpense }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-            {filteredExpenses.map((exp) => {
+            {filteredExpenses.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="py-12 text-center text-slate-400">
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                    No transactions found
+                  </p>
+                  <p className="text-xs text-slate-400 mt-1">
+                    No expenses match your search query or selected filter.
+                  </p>
+                </td>
+              </tr>
+            ) : (
+              filteredExpenses.map((exp) => {
               const payer = allUsers.find((u) => u.id === exp.paidBy);
               const group = groups.find((g) => g.id === exp.groupId);
 
@@ -191,7 +198,7 @@ export default function TransactionsView({ onSelectExpense }) {
                   </td>
                 </tr>
               );
-            })}
+            }))}
           </tbody>
         </table>
       </div>
