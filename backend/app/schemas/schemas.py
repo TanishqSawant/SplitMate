@@ -17,6 +17,38 @@ class HealthResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# User & Authentication
+# ---------------------------------------------------------------------------
+
+class UserRegister(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["Tanishq"])
+    email: EmailStr = Field(..., examples=["tanishq@example.com"])
+    password: str = Field(
+        ..., min_length=8, max_length=128, description="Password must be at least 8 characters"
+    )
+
+
+class UserLogin(BaseModel):
+    email: EmailStr = Field(..., examples=["tanishq@example.com"])
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+class UserResponse(BaseModel):
+    id: UUID
+    name: str
+    email: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+# ---------------------------------------------------------------------------
 # ExpenseGroup
 # ---------------------------------------------------------------------------
 
@@ -27,6 +59,7 @@ class GroupCreate(BaseModel):
 class GroupResponse(BaseModel):
     id: UUID
     name: str
+    creator_id: UUID | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -44,6 +77,7 @@ class MemberCreate(BaseModel):
 class MemberResponse(BaseModel):
     id: UUID
     group_id: UUID
+    user_id: UUID | None = None
     name: str
     email: str
     created_at: datetime

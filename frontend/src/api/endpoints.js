@@ -33,6 +33,9 @@ export const API_ENDPOINTS = {
     DETAILS: (expenseId) => `/expenses/${expenseId}`,
     DELETE: (expenseId) => `/expenses/${expenseId}`,
     SETTLE: '/expenses/settle',
+    ASSIGN: (expenseId) => `/expenses/${expenseId}/assign`,
+    SPLITS: (expenseId) => `/expenses/${expenseId}/splits`,
+    INITIALIZE_PAYMENTS: (expenseId) => `/expenses/${expenseId}/initialize-payments`,
   },
 
   // AI Receipt Extraction (Pawan + Tanishq)
@@ -46,10 +49,15 @@ export const API_ENDPOINTS = {
     SUBMIT_EXTRACTION: (receiptId) => `/receipts/${receiptId}/extraction`,
   },
 
-  // PayPal Sandbox Integration (Tanay)
+  // PayPal Sandbox Integration (Tanay & Dhruv - Phase 9)
+  // Backend contract (payments.py):
+  //   POST /api/payments/{payment_id}/create-order  → creates PayPal order (status: pending -> order_created)
+  //   POST /api/payments/{payment_id}/capture       → captures order server-side (status: order_created -> captured)
+  //   GET  /api/payments/{payment_id}               → checks verified status
   PAYMENTS: {
-    CREATE_ORDER: '/payments/paypal/create-order',
-    CAPTURE_ORDER: '/payments/paypal/capture-order',
+    CREATE_ORDER: (paymentId) => `/payments/${paymentId}/create-order`,
+    CAPTURE: (paymentId) => `/payments/${paymentId}/capture`,
+    GET: (paymentId) => `/payments/${paymentId}`,
     HISTORY: '/payments/history',
   },
 

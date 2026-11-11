@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { PayPalScriptProvider } from '@paypal/react-paypal-js';
 import { ThemeProvider } from './context/ThemeContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ExpenseProvider, useExpenses } from './context/ExpenseContext';
@@ -123,12 +124,21 @@ function MainApp() {
 }
 
 export default function App() {
+  const paypalOptions = {
+    clientId: (typeof import.meta !== 'undefined' && import.meta.env?.VITE_PAYPAL_CLIENT_ID) || 'sb',
+    currency: 'USD',
+    intent: 'capture',
+    components: 'buttons',
+  };
+
   return (
     <ThemeProvider>
       <AuthProvider>
-        <ExpenseProvider>
-          <MainApp />
-        </ExpenseProvider>
+        <PayPalScriptProvider options={paypalOptions}>
+          <ExpenseProvider>
+            <MainApp />
+          </ExpenseProvider>
+        </PayPalScriptProvider>
       </AuthProvider>
     </ThemeProvider>
   );

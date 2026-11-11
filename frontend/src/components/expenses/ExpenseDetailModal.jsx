@@ -131,6 +131,8 @@ export default function ExpenseDetailModal({ expense, isOpen, onClose }) {
                   amount: mySplit.share,
                   note: `Settling ${expense.description}`,
                   groupId: expense.groupId,
+                  expenseId: expense.id,
+                  paymentId: mySplit?.paymentId || null,
                 });
               }}
             >

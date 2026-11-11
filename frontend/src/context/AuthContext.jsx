@@ -1,9 +1,11 @@
+/* oxlint-disable react/only-export-components */
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { MOCK_USERS } from '../api/mockData';
 import { apiClient } from '../api/client';
 import { API_ENDPOINTS } from '../api/endpoints';
 
 const AuthContext = createContext();
+export default AuthContext;
 
 export function AuthProvider({ children }) {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
@@ -16,7 +18,19 @@ export function AuthProvider({ children }) {
     const authFlag = localStorage.getItem('splitmate_is_authenticated');
     if (authFlag === 'false') return null;
     const saved = localStorage.getItem('splitmate_auth_user');
-    return saved ? JSON.parse(saved) : MOCK_USERS[0];
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        const match = MOCK_USERS.find((u) => u.id === parsed.id);
+        if (match) {
+          return { ...match, ...parsed, name: match.name, role: match.role };
+        }
+        return parsed;
+      } catch {
+        return MOCK_USERS[0];
+      }
+    }
+    return MOCK_USERS[0];
   });
   const [isLoading, setIsLoading] = useState(false);
 
@@ -48,19 +62,32 @@ export function AuthProvider({ children }) {
         throw new Error('Please provide both email and password.');
       }
 
-      await apiClient.request(API_ENDPOINTS.AUTH.LOGIN, {
+      const response = await apiClient.request(API_ENDPOINTS.AUTH.LOGIN, {
         method: 'POST',
         body: JSON.stringify({ email: email.trim(), password: password.trim() }),
       });
 
-      const user = MOCK_USERS.find((u) => u.email.toLowerCase() === email.trim().toLowerCase()) || {
+      // Preserve JWT token returned by Tanishq's backend
+      if (response && response.access_token) {
+        apiClient.setToken(response.access_token);
+      }
+
+      const matchedMock = MOCK_USERS.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
+      const user = response?.user ? {
+        id: response.user.id,
+        name: response.user.name,
+        email: response.user.email,
+        avatar: matchedMock?.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+        paypalEmail: matchedMock?.paypalEmail || `${response.user.email.split('@')[0]}@sandbox.paypal.com`,
+        role: matchedMock?.role || 'Team Member',
+      } : (matchedMock || {
         id: `usr_${Date.now()}`,
         name: email.split('@')[0],
         email: email.trim(),
         avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
         paypalEmail: `${email.split('@')[0]}-sandbox@paypal.com`,
         role: 'Team Member',
-      };
+      });
 
       setCurrentUser(user);
       setIsAuthenticated(true);
@@ -80,16 +107,28 @@ export function AuthProvider({ children }) {
       if (!userData?.name?.trim() || !userData?.email?.trim() || !userData?.password?.trim()) {
         throw new Error('Name, email, and password are required.');
       }
-      if (userData.password.length < 4) {
-        throw new Error('Password must be at least 4 characters.');
+      if (userData.password.length < 8) {
+        throw new Error('Password must be at least 8 characters.');
       }
 
-      await apiClient.request(API_ENDPOINTS.AUTH.REGISTER, {
+      const response = await apiClient.request(API_ENDPOINTS.AUTH.REGISTER, {
         method: 'POST',
         body: JSON.stringify(userData),
       });
 
-      const newUser = {
+      // Preserve JWT token returned by Tanishq's backend
+      if (response && response.access_token) {
+        apiClient.setToken(response.access_token);
+      }
+
+      const newUser = response?.user ? {
+        id: response.user.id,
+        name: response.user.name,
+        email: response.user.email,
+        avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+        paypalEmail: userData.paypalEmail?.trim() || `${response.user.email.split('@')[0]}@sandbox.paypal.com`,
+        role: 'Team Member',
+      } : {
         id: `usr_${Date.now()}`,
         name: userData.name.trim(),
         email: userData.email.trim(),
@@ -111,11 +150,20 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    apiClient.clearToken();
     setCurrentUser(null);
     setIsAuthenticated(false);
     localStorage.removeItem('splitmate_auth_user');
     localStorage.setItem('splitmate_is_authenticated', 'false');
   };
+
+  // Handle unauthorized session expiry events AFTER logout is defined
+  useEffect(() => {
+    const handleUnauthorized = () => logout();
+    window.addEventListener('splitmate_auth_unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('splitmate_auth_unauthorized', handleUnauthorized);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const updateProfile = (updates) => {
     setCurrentUser((prev) => ({ ...prev, ...updates }));

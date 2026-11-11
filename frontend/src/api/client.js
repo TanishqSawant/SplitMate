@@ -13,13 +13,42 @@ import {
 } from './mockData.js';
 
 const BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || 'http://localhost:8000/api';
-const DEFAULT_TIMEOUT_MS = 6000;
+const USE_MOCK_API = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_USE_MOCK_API === 'true');
+const DEFAULT_TIMEOUT_MS = 10000;
 
 class ApiClient {
   constructor() {
     this.baseURL = BASE_URL;
     this.isBackendAvailable = null; // null: unknown, true: online, false: offline/mock
     this.onStatusChangeCallbacks = new Set();
+  }
+
+  getToken() {
+    try {
+      return localStorage.getItem('splitmate_access_token');
+    } catch {
+      return null;
+    }
+  }
+
+  setToken(token) {
+    try {
+      if (token) {
+        localStorage.setItem('splitmate_access_token', token);
+      } else {
+        localStorage.removeItem('splitmate_access_token');
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  clearToken() {
+    try {
+      localStorage.removeItem('splitmate_access_token');
+    } catch {
+      // ignore storage errors
+    }
   }
 
   subscribeStatus(callback) {
@@ -72,16 +101,18 @@ class ApiClient {
   }
 
   /**
-   * Generic request executor with timeout and fallback
+   * Generic request executor with JWT authentication and error handling
    */
   async request(endpoint, options = {}) {
     const url = `${this.baseURL}${endpoint}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), options.timeout || DEFAULT_TIMEOUT_MS);
 
+    const token = this.getToken();
     const headers = {
       'Accept': 'application/json',
       ...(!options.isFormData && { 'Content-Type': 'application/json' }),
+      ...(token && !options.skipAuth ? { 'Authorization': `Bearer ${token}` } : {}),
       ...options.headers,
     };
 
@@ -95,15 +126,29 @@ class ApiClient {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
+        // Handle expired session / invalid token (401) without incorrectly logging out on 403
+        if (response.status === 401) {
+          this.clearToken();
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('splitmate_auth_unauthorized'));
+          }
+        }
+
         const errorBody = await response.json().catch(() => ({}));
-        throw new Error(errorBody.detail || errorBody.message || `HTTP ${response.status}: ${response.statusText}`);
+        const errorDetail = errorBody.detail || errorBody.message || `HTTP ${response.status}: ${response.statusText}`;
+        const errorMsg = typeof errorDetail === 'string' ? errorDetail : JSON.stringify(errorDetail);
+        const err = new Error(errorMsg);
+        err.status = response.status;
+        err.body = errorBody;
+        throw err;
       }
 
       this.notifyStatus(true);
       return await response.json();
     } catch (err) {
       clearTimeout(timeoutId);
-      // If server is unreachable, timed out, or offline, mark backend offline and provide mock response
+
+      // If server is unreachable, timed out, or network failed
       const isNetworkError =
         err.name === 'AbortError' ||
         err.name === 'TypeError' ||
@@ -115,9 +160,20 @@ class ApiClient {
 
       if (isNetworkError) {
         this.notifyStatus(false);
-        console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to resilient mock service.`);
-        return this.handleMockFallback(endpoint, options);
+
+        // Security rule: Never mock payments or receipts
+        if (typeof endpoint === 'string' && (endpoint.includes('/payments') || endpoint.includes('/receipts'))) {
+          throw new Error('Unable to connect to the backend service. Please ensure the server is running on http://localhost:8000.');
+        }
+
+        if (USE_MOCK_API) {
+          console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to mock service.`);
+          return this.handleMockFallback(endpoint, options);
+        }
+
+        throw new Error(`Unable to connect to backend server at ${url}. Please ensure the server is running on http://localhost:8000.`);
       }
+
       throw err;
     }
   }
@@ -185,46 +241,11 @@ class ApiClient {
       }
     }
 
-    // 5. AI Receipt Extraction (Never fabricate fake OCR results)
-    // The frontend calls POST /receipts/upload then polls GET /receipts/{id}.
-    // If the backend is unreachable during upload or poll, throw — do NOT return mock receipt data.
-    if (endpoint === API_ENDPOINTS.RECEIPTS.UPLOAD) {
-      // Per hackathon safety rules: Never invent receipt details or return unrelated demo data for user uploads.
+    // 5. AI Receipt Extraction & PayPal Payments (Never mock real financial transactions)
+    if (typeof endpoint === 'string' && (endpoint.includes('/receipts') || endpoint.includes('/payments'))) {
       throw new Error(
-        'Unable to connect to the receipt extraction service. Please ensure the backend server is running on http://localhost:8000.'
+        'Real PayPal payments and AI receipt extraction require the backend service to be running.'
       );
-    }
-    // Also block polling fallback
-    if (typeof endpoint === 'string' && endpoint.startsWith('/receipts/')) {
-      throw new Error(
-        'Unable to connect to the receipt extraction service. Please ensure the backend server is running on http://localhost:8000.'
-      );
-    }
-
-    // 6. PayPal Create Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        orderId: `ORDER-${Math.random().toString(36).substring(2, 11).toUpperCase()}`,
-        status: 'CREATED',
-        amount: body.amount,
-        currency: body.currency || 'USD',
-        approvalUrl: 'https://www.sandbox.paypal.com/checkoutnow?token=mock_sandbox_token'
-      };
-    }
-
-    // 7. PayPal Capture Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        captureId: `CAPTURE-${Math.random().toString(36).substring(2, 12).toUpperCase()}`,
-        orderId: body.orderId,
-        status: 'COMPLETED',
-        amount: body.amount,
-        payer: body.payerId,
-        receiver: body.receiverEmail,
-        timestamp: new Date().toISOString(),
-      };
     }
 
     // Default fallback
