@@ -12,6 +12,7 @@ from app.models.models import ExpenseGroup, GroupMember, User
 from app.schemas.schemas import (
     GroupCreate,
     GroupResponse,
+    GroupUpdate,
     MemberCreate,
     MemberResponse,
 )
@@ -43,7 +44,7 @@ def create_group(
     response_model=list[GroupResponse],
     summary="List all groups the current user belongs to",
 )
-def list_my_groups(
+def list_groups(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -58,6 +59,7 @@ def list_my_groups(
             | (func.lower(GroupMember.email) == normalized_email)
         )
         .distinct()
+        .order_by(ExpenseGroup.created_at.desc())
         .all()
     )
     return groups
@@ -124,3 +126,57 @@ def list_members(
 ):
     group = require_group_membership(db, group_id, current_user)
     return group.members
+
+
+@router.put(
+    "/{group_id}",
+    response_model=GroupResponse,
+    summary="Update an expense group",
+)
+def update_group(
+    group_id: uuid.UUID,
+    body: GroupUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    group = require_group_membership(db, group_id, current_user)
+    group.name = body.name.strip()
+    db.commit()
+    db.refresh(group)
+    return group
+
+
+@router.delete(
+    "/{group_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an expense group",
+)
+def delete_group(
+    group_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    group = require_group_membership(db, group_id, current_user)
+    db.delete(group)
+    db.commit()
+    return None
+
+
+@router.delete(
+    "/{group_id}/members/{member_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a member from a group",
+)
+def remove_member(
+    group_id: uuid.UUID,
+    member_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    group = require_group_membership(db, group_id, current_user)
+    member = db.get(GroupMember, member_id)
+    if not member or member.group_id != group_id:
+        raise HTTPException(status_code=404, detail="Member not found in this group.")
+    db.delete(member)
+    db.commit()
+    return None

@@ -44,13 +44,19 @@ class OCREngine:
     honest low-confidence fallback status.
     """
 
+    _UNSET = object()  # Sentinel to distinguish "not provided" from "explicitly None"
+
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key: str | None | object = _UNSET,
         preferred_engine: str = "gemini_vision",
     ):
         self.preferred_engine = preferred_engine
-        self.gemini_extractor = GeminiVisionExtractor(api_key=api_key)
+        # Pass api_key through to GeminiVisionExtractor, preserving sentinel if unset
+        if api_key is self._UNSET:
+            self.gemini_extractor = GeminiVisionExtractor()
+        else:
+            self.gemini_extractor = GeminiVisionExtractor(api_key=api_key)
         self.fallback_parser = RegexHeuristicFallback()
 
     @staticmethod

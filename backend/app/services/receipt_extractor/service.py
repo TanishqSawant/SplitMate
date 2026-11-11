@@ -29,20 +29,29 @@ class ReceiptExtractionService:
 
     ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
     DEFAULT_MAX_SIZE_MB = 10
+    _UNSET = object()  # Sentinel to distinguish "not provided" from "explicitly None"
 
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key: str | None | object = _UNSET,
         model: str | None = None,
         max_size_mb: int = DEFAULT_MAX_SIZE_MB,
         blur_threshold: float = ImagePreprocessor.BLUR_THRESHOLD,
     ):
-        self.api_key = api_key if api_key is not None else settings.GEMINI_API_KEY
+        # Use sentinel to detect when api_key was explicitly passed
+        if api_key is self._UNSET:
+            self.api_key = settings.GEMINI_API_KEY
+        else:
+            self.api_key = api_key
         self.model = model if model is not None else settings.GEMINI_MODEL
         self.max_size_bytes = max_size_mb * 1024 * 1024
         self.preprocessor = ImagePreprocessor(blur_threshold=blur_threshold)
         self.pdf_handler = PDFHandler()
-        self.ocr_engine = OCREngine(api_key=self.api_key, preferred_engine="gemini_vision")
+        # Pass api_key explicitly to OCREngine
+        if api_key is self._UNSET:
+            self.ocr_engine = OCREngine(preferred_engine="gemini_vision")
+        else:
+            self.ocr_engine = OCREngine(api_key=api_key, preferred_engine="gemini_vision")
 
     def validate_file(self, filename: str, file_size: int) -> str:
         """Validates filename extension and size bounds.

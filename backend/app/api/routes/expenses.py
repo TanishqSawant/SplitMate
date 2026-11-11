@@ -26,6 +26,7 @@ from app.schemas.schemas import (
     AssignmentResponse,
     ExpenseCreate,
     ExpenseResponse,
+    ExpenseUpdate,
     MemberSplit,
     PaymentResponse,
     SplitsResponse,
@@ -123,6 +124,27 @@ def create_expense(
 
 
 @router.get(
+    "/group/{group_id}",
+    response_model=list[ExpenseResponse],
+    summary="List all expenses belonging to an expense group",
+)
+def list_group_expenses(group_id: uuid.UUID, db: Session = Depends(get_db)):
+    group = db.get(ExpenseGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found.")
+    return db.query(Expense).filter(Expense.group_id == group_id).order_by(Expense.created_at.desc()).all()
+
+
+@router.get(
+    "",
+    response_model=list[ExpenseResponse],
+    summary="List all expenses",
+)
+def list_all_expenses(db: Session = Depends(get_db)):
+    return db.query(Expense).order_by(Expense.created_at.desc()).all()
+
+
+@router.get(
     "/{expense_id}",
     response_model=ExpenseResponse,
     summary="Get an expense by ID",
@@ -134,6 +156,59 @@ def get_expense(
 ):
     expense = require_expense_access(db, expense_id, current_user)
     return expense
+
+
+@router.put(
+    "/{expense_id}",
+    response_model=ExpenseResponse,
+    summary="Update an expense",
+)
+def update_expense(
+    expense_id: uuid.UUID,
+    body: ExpenseUpdate,
+    db: Session = Depends(get_db),
+):
+    expense = db.get(Expense, expense_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found.")
+
+    for p in expense.payments:
+        if p.status == PaymentStatus.CAPTURED:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot edit expense: payment has already been captured.",
+            )
+
+    if body.total_amount is not None:
+        expense.total_amount = body.total_amount
+    if body.currency is not None:
+        expense.currency = body.currency
+
+    db.commit()
+    db.refresh(expense)
+    return expense
+
+
+@router.delete(
+    "/{expense_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an expense",
+)
+def delete_expense(expense_id: uuid.UUID, db: Session = Depends(get_db)):
+    expense = db.get(Expense, expense_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found.")
+
+    for p in expense.payments:
+        if p.status == PaymentStatus.CAPTURED:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot delete expense: payment has already been captured.",
+            )
+
+    db.delete(expense)
+    db.commit()
+    return None
 
 
 @router.post(

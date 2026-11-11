@@ -1,4 +1,4 @@
-﻿"""Tests for user authentication: registration, login, JWT validation, and token expiration."""
+"""Tests for user authentication: registration, login, JWT validation, and token expiration."""
 
 from datetime import timedelta
 
@@ -234,4 +234,74 @@ def test_development_uses_documented_insecure_key(monkeypatch):
     )
 
     assert cfg.JWT_SECRET_KEY == "dev-insecure-jwt-secret-key-not-for-production"
+def test_update_profile(client):
+    """Test updating user profile."""
+    reg_resp = client.post("/api/auth/register", json={
+        "name": "Original Name",
+        "email": "update.test@splitmate.io",
+        "password": "password123",
+    })
+    token = reg_resp.json()["access_token"]
 
+    update_resp = client.put(
+        "/api/auth/profile",
+        json={"name": "Updated Name", "paypal_email": "updated@paypal.com"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert update_resp.status_code == 200
+    assert update_resp.json()["name"] == "Updated Name"
+    assert update_resp.json()["paypal_email"] == "updated@paypal.com"
+
+
+def test_logout_revokes_session(client):
+    """Test logout terminates session and invalidates access token."""
+    reg_resp = client.post("/api/auth/register", json={
+        "name": "Logout User",
+        "email": "logout.test@splitmate.io",
+        "password": "password123",
+    })
+    token = reg_resp.json()["access_token"]
+
+    # Verify token works
+    resp1 = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp1.status_code == 200
+
+    # Logout
+    logout_resp = client.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
+    assert logout_resp.status_code == 200
+
+    # Verify token no longer works
+    resp2 = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp2.status_code == 401
+
+
+def test_password_storage_security(client, db_session):
+    """Verify passwords are never stored in plaintext and use cryptographic hashing."""
+    from app.models.models import User
+    plain = "mysecretplaintext123"
+    client.post("/api/auth/register", json={
+        "name": "Crypto Check",
+        "email": "crypto@splitmate.io",
+        "password": plain,
+    })
+
+    user = db_session.query(User).filter(User.email == "crypto@splitmate.io").first()
+    assert user is not None
+    assert plain not in user.password_hash
+    assert "$" in user.password_hash
+
+
+def test_jwt_tampered_token_rejected_with_401(client, db_session):
+    """Test that a JWT with a forged or altered payload is rejected."""
+    reg_resp = client.post("/api/auth/register", json={
+        "name": "Tamper User",
+        "email": "tamper.test@splitmate.io",
+        "password": "password123",
+    })
+    valid_token = reg_resp.json()["access_token"]
+
+    # Tamper with the token string
+    tampered_token = valid_token[:-4] + "wxyz"
+
+    resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {tampered_token}"})
+    assert resp.status_code == 401

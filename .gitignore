@@ -224,6 +224,14 @@ __marimo__/
 uploads/
 backend/uploads/
 
+# SplitMate SQLite Databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+backend/splitmate.db
+backend/test.db
+
 # Node.js (frontend)
 node_modules/
 dist/

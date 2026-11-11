@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.models import GroupMember, Payment, PaymentStatus, User
+from app.models.models import ExtractionStatus, GroupMember, Payment, PaymentStatus, Receipt, User
 from app.schemas.schemas import (
     PaymentCaptureRequest,
     PaymentCreateOrderRequest,
@@ -18,7 +18,7 @@ from app.schemas.schemas import (
     PaymentDirectCreateOrderRequest,
     PaymentResponse,
 )
-from app.services.authorization import is_user_group_member, require_payment_access
+from app.services.authorization import is_user_group_member, require_expense_access, require_payment_access
 from app.services.paypal_service import (
     PayPalAuthError,
     PayPalCaptureError,
@@ -187,11 +187,11 @@ def capture_payment_direct(
 @router.post(
     "/{payment_id}/create-order",
     response_model=PaymentResponse,
-    summary="Create a PayPal order for a payment (Tanay implements)",
+    summary="Create a PayPal order for a payment",
 )
 def create_paypal_order(
     payment_id: uuid.UUID,
-    body: PaymentCreateOrderRequest,
+    body: PaymentCreateOrderRequest | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     service: PayPalService = Depends(get_paypal_service),
@@ -239,6 +239,19 @@ def create_paypal_order(
             detail=detail_msg,
         )
 
+    # 3.5. Completion Gate: Verify receipt extraction is completed before allowing payment
+    if payment.expense and payment.expense.receipt_id:
+        receipt = db.get(Receipt, payment.expense.receipt_id)
+        if receipt and receipt.extraction_status != ExtractionStatus.COMPLETED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot initialize payment: linked receipt extraction is not completed "
+                    f"(status: {receipt.extraction_status.value}). "
+                    "Human review must be completed before splitting or initializing payments."
+                ),
+            )
+
     # 4. Call PayPal Orders API v2
     try:
         order_data = service.create_order(
@@ -246,8 +259,8 @@ def create_paypal_order(
             currency=payment.currency,
             reference_id=str(payment.id),
             description=f"SplitMate expense split payment {payment.id}",
-            return_url=body.return_url,
-            cancel_url=body.cancel_url,
+            return_url=body.return_url if body else None,
+            cancel_url=body.cancel_url if body else None,
             idempotency_key=f"order_{payment.id}",
         )
     except PayPalAuthError as exc:
@@ -287,11 +300,10 @@ def create_paypal_order(
     resp.approval_url = order_data.get("approval_url")
     return resp
 
-
 @router.post(
     "/{payment_id}/capture",
     response_model=PaymentResponse,
-    summary="Capture a PayPal payment (Tanay implements)",
+    summary="Capture a PayPal payment and verify server-side status",
 )
 def capture_payment(
     payment_id: uuid.UUID,
@@ -350,6 +362,19 @@ def capture_payment(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="PayPal order ID does not match the payment record.",
         )
+
+    # 4.5. Completion Gate: Verify receipt extraction is completed before allowing capture
+    if payment.expense and payment.expense.receipt_id:
+        receipt = db.get(Receipt, payment.expense.receipt_id)
+        if receipt and receipt.extraction_status != ExtractionStatus.COMPLETED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot capture payment: linked receipt extraction is not completed "
+                    f"(status: {receipt.extraction_status.value}). "
+                    "Human review must be completed before splitting or initializing payments."
+                ),
+            )
 
     capture_result = None
     try:
@@ -469,7 +494,6 @@ def capture_payment(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to commit payment capture.",
         ) from db_exc
-
     return payment
 
 
@@ -485,3 +509,15 @@ def get_payment(
 ):
     payment = require_payment_access(db, payment_id, current_user, require_payer=False)
     return payment
+@router.get(
+    "/expense/{expense_id}",
+    response_model=list[PaymentResponse],
+    summary="List all payments for an expense",
+)
+def list_expense_payments(
+    expense_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    require_expense_access(db, expense_id, current_user)
+    return db.query(Payment).filter(Payment.expense_id == expense_id).all()

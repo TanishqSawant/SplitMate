@@ -1,4 +1,4 @@
-﻿"""Pydantic schemas for request/response validation."""
+"""Pydantic schemas for request/response validation."""
 
 from datetime import datetime
 from decimal import Decimal
@@ -25,8 +25,13 @@ class UserRegister(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, examples=["Tanishq"])
     email: EmailStr = Field(..., examples=["tanishq@example.com"])
     password: str = Field(
-        ..., min_length=8, max_length=128, description="Password must be at least 8 characters"
+        ..., min_length=6, max_length=128, description="Password must be at least 6 characters"
     )
+    paypal_email: str | None = Field(default=None, max_length=320)
+    avatar: str | None = Field(default=None, max_length=500)
+
+
+UserRegisterRequest = UserRegister
 
 
 class UserLogin(BaseModel):
@@ -34,10 +39,21 @@ class UserLogin(BaseModel):
     password: str = Field(..., min_length=1, max_length=128)
 
 
+UserLoginRequest = UserLogin
+
+
+class UserProfileUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    paypal_email: str | None = Field(default=None, max_length=320)
+    avatar: str | None = Field(default=None, max_length=500)
+
+
 class UserResponse(BaseModel):
     id: UUID
     name: str
     email: str
+    paypal_email: str | None = None
+    avatar: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -49,12 +65,19 @@ class TokenResponse(BaseModel):
     user: UserResponse
 
 
+AuthTokenResponse = TokenResponse
+
+
 # ---------------------------------------------------------------------------
 # ExpenseGroup
 # ---------------------------------------------------------------------------
 
 class GroupCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, examples=["Dinner at Mario's"])
+
+
+class GroupUpdate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, examples=["Dinner at Mario's (Updated)"])
 
 
 class GroupResponse(BaseModel):
@@ -167,6 +190,21 @@ class ReceiptItemExtraction(BaseModel):
     total_price: Decimal | None = Field(default=None, ge=0, decimal_places=2)
 
 
+class ReceiptItemUpdate(BaseModel):
+    id: UUID | None = None
+    item_name: str = Field(..., min_length=1, max_length=255)
+    quantity: int = Field(default=1, ge=1)
+    unit_price: Decimal = Field(default=Decimal("0.00"), ge=0, decimal_places=2)
+    total_price: Decimal = Field(default=Decimal("0.00"), ge=0, decimal_places=2)
+
+
+class ReceiptItemsUpdateRequest(BaseModel):
+    merchant_name: str | None = None
+    currency: str | None = None
+    tax: Decimal | None = None
+    items: list[ReceiptItemUpdate] = Field(..., min_length=1)
+
+
 class ReceiptExtractionRequest(BaseModel):
     """Payload that Pawan's AI extraction service submits after processing a receipt."""
     merchant_name: str | None = Field(default=None, max_length=255, examples=["Mario's Pizzeria"])
@@ -214,6 +252,22 @@ class ReceiptReviewSubmission(BaseModel):
     items: list[ReceiptItemReview] = Field(..., min_length=1, description="Reviewed line items ΓÇö at least one required")
 
 
+class SampleReceiptItem(BaseModel):
+    name: str
+    price: Decimal
+    quantity: int = 1
+
+
+class SampleReceiptResponse(BaseModel):
+    id: str
+    name: str
+    merchant: str
+    date: str
+    total: Decimal
+    category: str
+    items: list[SampleReceiptItem]
+
+
 # ---------------------------------------------------------------------------
 # Expense
 # ---------------------------------------------------------------------------
@@ -223,6 +277,11 @@ class ExpenseCreate(BaseModel):
     receipt_id: UUID | None = None
     total_amount: Decimal = Field(..., gt=0, decimal_places=2)
     currency: str = Field(default="USD", min_length=3, max_length=3)
+
+
+class ExpenseUpdate(BaseModel):
+    total_amount: Decimal | None = Field(default=None, gt=0, decimal_places=2)
+    currency: str | None = Field(default=None, min_length=3, max_length=3)
 
 
 class ExpenseResponse(BaseModel):

@@ -1,0 +1,67 @@
+name: SplitMate CI / CD Validation
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  backend-test:
+    name: Backend Test Suite (FastAPI / pytest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Backend Test Suite
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:///./test_ci.db
+          APP_ENV: testing
+          DEBUG: false
+          INTERNAL_SERVICE_SECRET: test-ci-secret-12345
+          JWT_SECRET_KEY: test-ci-jwt-secret-key-32charslong!
+        run: |
+          python -m pytest tests/ -v
+
+  frontend-build:
+    name: Frontend Production Build (React / Vite)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci || npm install
+
+      - name: Build production bundle
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: https://splitmate-api.onrender.com/api
+          VITE_ENABLE_MOCK_FALLBACK: false
+          VITE_USE_MOCK_API: false
+          VITE_PAYPAL_CLIENT_ID: sb
+        run: npm run build

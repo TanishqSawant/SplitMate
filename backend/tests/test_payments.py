@@ -76,7 +76,7 @@ def _create_payment_setup(client):
         files={"file": ("r.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
     assert upload_resp.status_code == 201
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]  # Use receipt_id, not id
 
     extract_resp = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -853,4 +853,12 @@ def test_concurrent_capture_attempts(client):
         assert "already captured" in second_resp.json()["detail"].lower()
     finally:
         client.app.dependency_overrides.pop(get_paypal_service, None)
->>>>>>> c371a97313312aa71e8b6e2fcb72737f7bb284d9
+
+
+def test_list_expense_payments(client):
+    payment_id, expense_id, _ = _create_payment_setup(client)
+    resp = client.get(f"/api/payments/expense/{expense_id}")
+    assert resp.status_code == 200
+    payments = resp.json()
+    assert len(payments) >= 1
+    assert any(p["id"] == payment_id for p in payments)

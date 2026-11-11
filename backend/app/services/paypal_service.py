@@ -1,4 +1,4 @@
-﻿"""PayPal Sandbox API integration service using PayPal Orders API v2.
+"""PayPal Sandbox API integration service using PayPal Orders API v2.
 
 Handles OAuth 2.0 client credentials authentication, order creation,
 and server-side payment capture using the official PayPal REST v2 endpoints.
@@ -8,6 +8,7 @@ from decimal import Decimal
 import logging
 import time
 from typing import Any
+import uuid
 
 import httpx
 
@@ -81,14 +82,43 @@ class PayPalService:
         base_url: str | None = None,
         timeout: float | None = None,
     ):
-        self.client_id = client_id or settings.PAYPAL_CLIENT_ID
-        self.client_secret = client_secret or settings.PAYPAL_CLIENT_SECRET
+        # Use explicit None check to distinguish "" from None
+        self.client_id = client_id if client_id is not None else settings.PAYPAL_CLIENT_ID
+        self.client_secret = client_secret if client_secret is not None else settings.PAYPAL_CLIENT_SECRET
         self.base_url = (base_url or settings.PAYPAL_BASE_URL).rstrip("/")
         self.timeout = timeout if timeout is not None else settings.PAYPAL_TIMEOUT_SECONDS
 
         # Token caching state
         self._access_token: str | None = None
         self._token_expires_at: float = 0.0
+        self._mock_mode: bool = False
+        self._mock_orders: dict[str, dict[str, Any]] = {}
+
+    @property
+    def mock_mode(self) -> bool:
+        """Check if service is explicitly forced into mock mode."""
+        return self._mock_mode
+
+    @mock_mode.setter
+    def mock_mode(self, value: bool) -> None:
+        """Explicitly enable or disable mock mode."""
+        self._mock_mode = bool(value)
+
+    @property
+    def is_configured(self) -> bool:
+        """Returns True if live/sandbox credentials are provided and non-dummy,
+        unless mock mode is explicitly forced.
+        """
+        if self._mock_mode:
+            return False
+        if getattr(settings, "PAYPAL_MOCK_MODE", False):
+            return False
+        return bool(
+            self.client_id
+            and self.client_secret
+            and not self.client_id.startswith("mock")
+            and self.client_id.strip() != ""
+        )
 
     def get_access_token(self, force_refresh: bool = False) -> str:
         """Obtain or return a cached PayPal OAuth 2.0 access token.
@@ -96,11 +126,15 @@ class PayPalService:
         Uses client_credentials grant type and basic authentication.
         Caches the token in-memory until 60 seconds before expiration.
         """
+        if self._mock_mode:
+            return "mock_sandbox_access_token"
+
         now = time.time()
         if not force_refresh and self._access_token and now < self._token_expires_at:
             return self._access_token
 
-        if not self.client_id or not self.client_secret:
+        # Check credentials before making network call
+        if not self.client_id or not self.client_secret or not self.client_id.strip() or not self.client_secret.strip():
             raise PayPalAuthError(
                 message="PayPal credentials are not configured. Set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET."
             )
@@ -177,6 +211,26 @@ class PayPalService:
         Returns:
             Dict containing order id, status, approval_url, and links.
         """
+        if self._mock_mode:
+            ref_slug = reference_id[:8] if reference_id else uuid.uuid4().hex[:8]
+            order_id = f"MOCK-ORD-{ref_slug.upper()}-{int(time.time())}"
+            approval_url = f"https://www.sandbox.paypal.com/checkoutnow?token={order_id}"
+            self._mock_orders[order_id] = {
+                "id": order_id,
+                "amount": amount,
+                "currency": currency,
+                "status": "CREATED",
+                "reference_id": reference_id,
+            }
+            return {
+                "id": order_id,
+                "status": "CREATED",
+                "approval_url": approval_url,
+                "links": [{"rel": "approve", "href": approval_url}],
+                "raw_response": {"id": order_id, "status": "CREATED"},
+                "mock": True,
+            }
+
         token = self.get_access_token()
 
         try:
@@ -331,6 +385,25 @@ class PayPalService:
         Returns:
             Dict containing capture_id, status, captured_amount, captured_currency, raw_response.
         """
+        if self._mock_mode:
+            order_info = self._mock_orders.get(order_id, {})
+            order_suffix = order_id[-8:] if len(order_id) >= 8 else uuid.uuid4().hex[:8]
+            capture_id = f"MOCK-CAP-{order_suffix.upper()}"
+            amount = order_info.get("amount", Decimal("25.00"))
+            currency = order_info.get("currency", "USD")
+            order_info["status"] = "COMPLETED"
+            order_info["capture_id"] = capture_id
+            return {
+                "order_id": order_id,
+                "capture_id": capture_id,
+                "status": "COMPLETED",
+                "overall_status": "COMPLETED",
+                "captured_amount": str(amount),
+                "captured_currency": currency,
+                "raw_response": {"id": capture_id, "status": "COMPLETED"},
+                "mock": True,
+            }
+
         token = self.get_access_token()
 
         capture_url = f"{self.base_url}/v2/checkout/orders/{order_id}/capture"
@@ -412,6 +485,21 @@ class PayPalService:
 
     def get_order_details(self, order_id: str) -> dict[str, Any]:
         """Fetch details of an existing order from PayPal."""
+        if self._mock_mode:
+            order_info = self._mock_orders.get(order_id, {})
+            return {
+                "id": order_id,
+                "status": order_info.get("status", "COMPLETED"),
+                "purchase_units": [
+                    {
+                        "amount": {
+                            "value": str(order_info.get("amount", Decimal("25.00"))),
+                            "currency_code": order_info.get("currency", "USD"),
+                        }
+                    }
+                ],
+            }
+
         token = self.get_access_token()
         url = f"{self.base_url}/v2/checkout/orders/{order_id}"
         headers = {

@@ -107,7 +107,7 @@ class RegexHeuristicFallback:
                 merchant_name=None,
                 currency=None,
                 items=[],
-                confidence=None,
+                confidence=0.0,  # Zero confidence for completely empty input
                 is_fallback=True,
                 extraction_method="regex_heuristic_fallback",
                 warnings=warnings + ["No text could be extracted from document."],
@@ -195,8 +195,30 @@ class RegexHeuristicFallback:
                         )
                     )
 
-        # Fallback extraction has no genuine model confidence score; preserve None
-        confidence = None
+        # Calculate confidence score for fallback extraction based on completeness
+        # Start with base fallback confidence of 0.15
+        confidence_score = 0.15
+
+        # Add points for each field successfully extracted (max 0.35 total)
+        if merchant_name:
+            confidence_score += 0.03
+        if currency:
+            confidence_score += 0.02
+        if receipt_date:
+            confidence_score += 0.02
+        if receipt_number:
+            confidence_score += 0.01
+        if subtotal is not None:
+            confidence_score += 0.02
+        if tax is not None:
+            confidence_score += 0.02
+        if final_total is not None:
+            confidence_score += 0.03
+        if items:
+            confidence_score += min(0.05, len(items) * 0.01)
+
+        # Cap confidence at 0.35 for regex fallback (never claim high confidence)
+        confidence = min(0.35, confidence_score)
 
         result = ReceiptExtractionResult(
             merchant_name=merchant_name,
@@ -225,14 +247,19 @@ class GeminiVisionExtractor:
 
     DEFAULT_MODEL = "gemini-2.5-flash"
     DEFAULT_TIMEOUT_MS = 25_000  # 25 seconds HTTP request timeout
+    _UNSET = object()  # Sentinel to distinguish "not provided" from "explicitly None"
 
     def __init__(
         self,
-        api_key: str | None = None,
+        api_key: str | None | object = _UNSET,
         model: str | None = None,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
     ):
-        self.api_key = api_key if api_key is not None else settings.GEMINI_API_KEY
+        # Use sentinel to detect when api_key was explicitly passed vs defaulted
+        if api_key is self._UNSET:
+            self.api_key = settings.GEMINI_API_KEY
+        else:
+            self.api_key = api_key
         self.model_name = model if model is not None else settings.GEMINI_MODEL
         self.timeout_ms = timeout_ms
         # Retained temporarily for backward compatibility; not reachable in production extraction

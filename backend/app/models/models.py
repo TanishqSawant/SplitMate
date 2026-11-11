@@ -91,6 +91,8 @@ class User(Base):
         String(320), unique=True, index=True, nullable=False
     )
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    paypal_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    avatar: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -100,6 +102,14 @@ class User(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    @property
+    def hashed_password(self) -> str:
+        return self.password_hash
+
+    @hashed_password.setter
+    def hashed_password(self, val: str) -> None:
+        self.password_hash = val
 
     # Relationships
     groups_created: Mapped[list["ExpenseGroup"]] = relationship(

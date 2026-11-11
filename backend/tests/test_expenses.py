@@ -745,3 +745,38 @@ def test_initialize_payments_succeeds_when_fully_assigned(client):
     resp = client.post(f"/api/expenses/{expense_id}/initialize-payments")
     assert resp.status_code == 201
     assert len(resp.json()) == 2
+
+
+def test_update_expense(client):
+    """Test updating expense total_amount and currency."""
+    group_id, _ = _setup_group_with_members(client, ["Alice"])
+    exp_resp = client.post(
+        "/api/expenses",
+        json={"group_id": group_id, "total_amount": "50.00", "currency": "USD"},
+    )
+    assert exp_resp.status_code == 201
+    expense_id = exp_resp.json()["id"]
+
+    update_resp = client.put(
+        f"/api/expenses/{expense_id}",
+        json={"total_amount": "75.50", "currency": "USD"},
+    )
+    assert update_resp.status_code == 200
+    assert float(update_resp.json()["total_amount"]) == 75.50
+
+
+def test_delete_expense(client):
+    """Test deleting an expense."""
+    group_id, _ = _setup_group_with_members(client, ["Alice"])
+    exp_resp = client.post(
+        "/api/expenses",
+        json={"group_id": group_id, "total_amount": "25.00", "currency": "USD"},
+    )
+    expense_id = exp_resp.json()["id"]
+
+    del_resp = client.delete(f"/api/expenses/{expense_id}")
+    assert del_resp.status_code == 204
+
+    # Verify expense is deleted
+    get_resp = client.get(f"/api/expenses/{expense_id}")
+    assert get_resp.status_code == 404

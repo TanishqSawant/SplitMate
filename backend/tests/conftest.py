@@ -6,11 +6,12 @@ mapping UUID to String for SQLite compatibility.
 """
 
 import io
-import uuid
 from pathlib import Path
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import create_engine, event, text as sa_text
 from sqlalchemy.orm import sessionmaker
 
@@ -28,12 +29,48 @@ settings.INTERNAL_SERVICE_SECRET = TEST_INTERNAL_SERVICE_SECRET
 settings.JWT_SECRET_KEY = "test-jwt-secret-key-that-is-at-least-32-bytes-long!"
 
 # ---------------------------------------------------------------------------
-# Minimal valid magic-byte prefixes for content-validation tests
+# Valid test receipt fixtures for content validation & extraction tests
 # ---------------------------------------------------------------------------
-VALID_JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 100   # JPEG SOI + APP0 marker
-VALID_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100   # PNG signature
+_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "receipts"
+_CLEAR_RESTAURANT_PNG_PATH = _FIXTURES_DIR / "receipt_01_clear_restaurant.png"
+_PDF_PATH = _FIXTURES_DIR / "receipt_05_digital_invoice.pdf"
+
+
+def _make_valid_jpeg() -> bytes:
+    """Generate genuinely valid, decodable JPEG receipt bytes."""
+    if _CLEAR_RESTAURANT_PNG_PATH.is_file():
+        img = Image.open(_CLEAR_RESTAURANT_PNG_PATH).convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+    # Fallback in-memory valid JPEG
+    img = Image.new("RGB", (200, 100), color=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def _make_valid_png() -> bytes:
+    """Load genuinely valid PNG receipt bytes."""
+    if _CLEAR_RESTAURANT_PNG_PATH.is_file():
+        return _CLEAR_RESTAURANT_PNG_PATH.read_bytes()
+    img = Image.new("RGB", (200, 100), color=(255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _make_valid_pdf() -> bytes:
+    """Load genuinely valid PDF receipt bytes."""
+    if _PDF_PATH.is_file():
+        return _PDF_PATH.read_bytes()
+    return b"%PDF-1.4\n" + b"\x00" * 100
+
+
+VALID_JPEG_BYTES = _make_valid_jpeg()
+VALID_PNG_BYTES = _make_valid_png()
 VALID_WEBP_BYTES = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 100  # WEBP RIFF container
-VALID_PDF_BYTES = b"%PDF-1.4\n" + b"\x00" * 100           # PDF header
+VALID_PDF_BYTES = _make_valid_pdf()
 
 # Default test user credentials
 DEFAULT_TEST_USER_EMAIL = "primary_user@example.com"
@@ -47,7 +84,10 @@ SQLALCHEMY_TEST_URL = f"sqlite:///{_TEST_DB_PATH.as_posix()}"
 
 # Remove any stale test DB from a previous aborted run before the engine is created.
 for _stale in (_TEST_DB_PATH, _TEST_DB_PATH.with_suffix(".db-wal"), _TEST_DB_PATH.with_suffix(".db-shm")):
-    _stale.unlink(missing_ok=True)
+    try:
+        _stale.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 engine = create_engine(
     SQLALCHEMY_TEST_URL, connect_args={"check_same_thread": False}
@@ -130,6 +170,42 @@ def unauth_client(db_session):
     """FastAPI test client with NO authentication headers."""
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def isolate_paypal_mock(request):
+    """Ensure mock mode is active for standard test suite to prevent external calls,
+    while allowing live tests (TestPayPalLiveSandbox) to run in live mode.
+    """
+    services = []
+    try:
+        from app.services.paypal import paypal_service as ps1
+        if ps1 and hasattr(ps1, "mock_mode"):
+            services.append(ps1)
+    except ImportError:
+        pass
+
+    try:
+        from app.services.paypal_service import paypal_service as ps2
+        if ps2 and hasattr(ps2, "mock_mode"):
+            services.append(ps2)
+    except ImportError:
+        pass
+
+    is_live_test = (
+        "LiveSandbox" in getattr(request.node.cls, "__name__", "")
+        or "live" in request.keywords
+    )
+
+    prev_modes = [(s, s.mock_mode) for s in services]
+    for s in services:
+        s.mock_mode = False if is_live_test else True
+
+    try:
+        yield
+    finally:
+        for s, prev in prev_modes:
+            s.mock_mode = prev
 
 
 def create_user_and_client(

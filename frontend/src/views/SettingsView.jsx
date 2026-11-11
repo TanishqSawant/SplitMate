@@ -1,3 +1,4 @@
+
 import React from 'react';
 import ProfileForm from '../components/settings/ProfileForm';
 import AccountOverview from '../components/settings/AccountOverview';
@@ -34,12 +35,13 @@ export default function SettingsView() {
           <div className="p-2 rounded-xl bg-blue-50 dark:bg-blue-950/70 text-[#0070BA] dark:text-blue-400">
             <Lock className="w-4 h-4" />
           </div>
+
           <div>
             <p className="font-semibold text-slate-900 dark:text-white">
-              End-to-End Financial Privacy
+              Security & Data Protection
             </p>
             <p className="text-[11px] mt-0.5">
-              SplitMate never stores banking passwords or secret API keys in browser storage.
+              SplitMate does not store banking passwords or secret API keys in browser storage.
             </p>
           </div>
         </div>

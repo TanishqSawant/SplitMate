@@ -1,31 +1,37 @@
 /**
  * SplitMate API Client Service Layer
- * 
- * Provides unified request execution, timeout handling, error normalization,
- * and resilient mock fallback for hackathon presentations.
+ *
+ * Provides unified request execution, timeout handling,
+ * error normalization, and resilient mock fallback for offline demos.
  */
 
-import { API_ENDPOINTS } from './endpoints';
+import { API_ENDPOINTS } from './endpoints.js';
 import {
   MOCK_USERS,
   MOCK_GROUPS,
-  MOCK_EXPENSES
-} from './mockData';
+  MOCK_EXPENSES,
+} from './mockData.js';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
-const USE_MOCK_FALLBACK = import.meta.env.VITE_USE_MOCK_API === 'true';
-const DEFAULT_TIMEOUT_MS = 10000;
+const BASE_URL =
+  (typeof import.meta !== 'undefined' &&
+    import.meta.env?.VITE_API_BASE_URL) ||
+  'http://localhost:8000/api';
+
+const DEFAULT_TIMEOUT_MS = 30000;
 
 class ApiClient {
   constructor() {
     this.baseURL = BASE_URL;
-    this.isBackendAvailable = null; // null: unknown, true: online, false: offline/mock
+    this.isBackendAvailable = null;
     this.onStatusChangeCallbacks = new Set();
   }
 
   getToken() {
     try {
-      return localStorage.getItem('splitmate_access_token');
+      return (
+        localStorage.getItem('splitmate_token') ||
+        localStorage.getItem('splitmate_access_token')
+      );
     } catch {
       return null;
     }
@@ -34,8 +40,10 @@ class ApiClient {
   setToken(token) {
     try {
       if (token) {
+        localStorage.setItem('splitmate_token', token);
         localStorage.setItem('splitmate_access_token', token);
       } else {
+        localStorage.removeItem('splitmate_token');
         localStorage.removeItem('splitmate_access_token');
       }
     } catch {
@@ -45,76 +53,142 @@ class ApiClient {
 
   clearToken() {
     try {
+      localStorage.removeItem('splitmate_token');
       localStorage.removeItem('splitmate_access_token');
     } catch {
       // ignore storage errors
     }
   }
 
+  /**
+   * Subscribe to backend availability changes.
+   *
+   * @param {function({isOnline: boolean}): void} callback
+   * @returns {function(): void} Unsubscribe function.
+   */
   subscribeStatus(callback) {
     this.onStatusChangeCallbacks.add(callback);
-    callback({
-      isOnline: this.isBackendAvailable,
-      baseURL: this.baseURL,
-    });
+
+    if (this.isBackendAvailable !== null) {
+      callback({
+        isOnline: this.isBackendAvailable,
+      });
+    }
+
     return () => this.onStatusChangeCallbacks.delete(callback);
   }
 
   notifyStatus(isOnline) {
     if (this.isBackendAvailable !== isOnline) {
       this.isBackendAvailable = isOnline;
-      this.onStatusChangeCallbacks.forEach((cb) =>
-        cb({ isOnline: this.isBackendAvailable, baseURL: this.baseURL })
-      );
+
+      this.onStatusChangeCallbacks.forEach((callback) => {
+        try {
+          callback({
+            isOnline,
+          });
+        } catch (e) {
+          console.error(
+            '[SplitMate API] Error executing status callback:',
+            e
+          );
+        }
+      });
     }
   }
 
   /**
-   * Health check to Tanishq's FastAPI backend
+   * Check whether the backend is reachable, auto-detecting localhost vs 127.0.0.1.
+   *
+   * @returns {Promise<boolean>}
    */
   async checkHealth() {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const configuredBase = this.baseURL;
+    const candidates = [configuredBase];
 
-      // The health router is mounted at /health (outside the /api-prefixed routers).
-      const healthBaseURL = this.baseURL.replace(/\/api\/?$/, '');
-      const response = await fetch(`${healthBaseURL}${API_ENDPOINTS.HEALTH}`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const data = await response.json();
-        this.notifyStatus(true);
-        return { online: true, data };
-      }
-      this.notifyStatus(false);
-      return { online: false, error: 'Status not OK' };
-    } catch {
-      this.notifyStatus(false);
-      return { online: false, error: 'Unreachable' };
+    if (configuredBase.includes('localhost:8000')) {
+      candidates.push(
+        configuredBase.replace('localhost:8000', '127.0.0.1:8000')
+      );
+    } else if (configuredBase.includes('127.0.0.1:8000')) {
+      candidates.push(
+        configuredBase.replace('127.0.0.1:8000', 'localhost:8000')
+      );
     }
+
+    for (const host of [...new Set(candidates)]) {
+      for (const healthPath of [
+        '/health',
+        '/api/health',
+      ]) {
+        const testUrl = `${host.replace(/\/api$/, '')}${healthPath}`;
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+
+        try {
+          const response = await fetch(testUrl, {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+            },
+            signal: controller.signal,
+          });
+
+          if (response.ok) {
+            clearTimeout(timeoutId);
+
+            if (host !== configuredBase) {
+              console.info(
+                `[SplitMate API] Auto-switching API baseURL to active host: ${host}`
+              );
+              this.baseURL = host;
+            }
+
+            this.notifyStatus(true);
+            return true;
+          }
+        } catch {
+          // Try next candidate
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }
+    }
+
+    this.notifyStatus(false);
+    return false;
   }
 
   /**
-   * Generic request executor with JWT authentication and error handling
+   * Primary request method with error normalization, dual-host retry, and fallback.
+   *
+   * @param {string} endpoint - API path relative to baseURL.
+   * @param {RequestInit & {isFormData?: boolean, timeout?: number, _retried?: boolean, skipAuth?: boolean}} [options={}]
+   * @returns {Promise<any>}
    */
   async request(endpoint, options = {}) {
-    const url = `${this.baseURL}${endpoint}`;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), options.timeout || DEFAULT_TIMEOUT_MS);
+    const cleanEndpoint = endpoint.startsWith('/api/') ? endpoint.slice(4) : endpoint;
+    const url = `${this.baseURL}${cleanEndpoint.startsWith('/') ? cleanEndpoint : '/' + cleanEndpoint}`;
+    const isReceiptAction =
+      cleanEndpoint.startsWith('/receipts/upload') ||
+      cleanEndpoint.includes('/extract');
+
+    const timeoutMs =
+      options.timeout ||
+      (isReceiptAction ? 90000 : DEFAULT_TIMEOUT_MS);
 
     const token = this.getToken();
     const headers = {
-      'Accept': 'application/json',
-      ...(!options.isFormData && { 'Content-Type': 'application/json' }),
-      ...(token && !options.skipAuth ? { 'Authorization': `Bearer ${token}` } : {}),
+      Accept: 'application/json',
+      ...(!options.isFormData && {
+        'Content-Type': 'application/json',
+      }),
+      ...(token && !options.skipAuth ? { Authorization: `Bearer ${token}` } : {}),
       ...options.headers,
     };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(url, {
@@ -123,10 +197,7 @@ class ApiClient {
         signal: controller.signal,
       });
 
-      clearTimeout(timeoutId);
-
       if (!response.ok) {
-        // Handle expired session / invalid token (401) without incorrectly logging out on 403
         if (response.status === 401) {
           this.clearToken();
           if (typeof window !== 'undefined') {
@@ -134,13 +205,23 @@ class ApiClient {
           }
         }
 
-        const errorBody = await response.json().catch(() => ({}));
-        const errorDetail = errorBody.detail || errorBody.message || `HTTP ${response.status}: ${response.statusText}`;
-        const errorMsg = typeof errorDetail === 'string' ? errorDetail : JSON.stringify(errorDetail);
-        const err = new Error(errorMsg);
-        err.status = response.status;
-        err.body = errorBody;
-        throw err;
+        let errorDetail = `HTTP ${response.status}: ${response.statusText}`;
+
+        try {
+          const errorJson = await response.json();
+          errorDetail =
+            errorJson.detail ||
+            errorJson.message ||
+            errorDetail;
+        } catch {
+          // Use default error string
+        }
+
+        const apiError = new Error(
+          typeof errorDetail === 'string' ? errorDetail : JSON.stringify(errorDetail)
+        );
+        apiError.status = response.status;
+        throw apiError;
       }
 
       this.notifyStatus(true);
@@ -148,7 +229,6 @@ class ApiClient {
     } catch (err) {
       clearTimeout(timeoutId);
 
-      // If server is unreachable, timed out, or network failed
       const isNetworkError =
         err.name === 'AbortError' ||
         err.name === 'TypeError' ||
@@ -158,177 +238,263 @@ class ApiClient {
         err.message?.toLowerCase().includes('connection refused') ||
         Boolean(err.cause);
 
-      if (isNetworkError) {
-        this.notifyStatus(false);
-
-        // Security rule: Never mock payments or receipts
-        if (typeof endpoint === 'string' && (endpoint.includes('/payments') || endpoint.includes('/receipts'))) {
-          throw new Error('Unable to connect to the backend service. Please ensure the server is running on http://localhost:8000.');
-        }
-
-        if (USE_MOCK_FALLBACK) {
-          console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to mock service.`);
-          return this.handleMockFallback(endpoint, options);
-        }
-
-        throw new Error(`Unable to connect to backend server at ${url}. Please ensure the server is running on http://localhost:8000.`);
+      if (!isNetworkError) {
+        throw err;
       }
 
-      throw err;
+      // Retry once using the alternate local host.
+      if (!options._retried) {
+        let alternateBase = null;
+
+        if (this.baseURL.includes('localhost:8000')) {
+          alternateBase = this.baseURL.replace(
+            'localhost:8000',
+            '127.0.0.1:8000'
+          );
+        } else if (this.baseURL.includes('127.0.0.1:8000')) {
+          alternateBase = this.baseURL.replace(
+            '127.0.0.1:8000',
+            'localhost:8000'
+          );
+        }
+
+        if (alternateBase) {
+          const originalBase = this.baseURL;
+
+          try {
+            this.baseURL = alternateBase;
+
+            return await this.request(endpoint, {
+              ...options,
+              _retried: true,
+            });
+          } catch (retryError) {
+            this.baseURL = originalBase;
+
+            if (
+              retryError.name !== 'AbortError' &&
+              retryError.name !== 'TypeError' &&
+              !retryError.message?.toLowerCase().includes('failed to fetch') &&
+              !retryError.message?.toLowerCase().includes('fetch failed') &&
+              !retryError.message?.toLowerCase().includes('networkerror') &&
+              !retryError.message?.toLowerCase().includes('connection refused')
+            ) {
+              throw retryError;
+            }
+
+            err = retryError;
+          }
+        }
+      }
+
+      this.notifyStatus(false);
+
+      const reason =
+        err.name === 'AbortError'
+          ? 'request timed out'
+          : 'connection failed';
+
+      console.warn(
+        `[SplitMate API] Backend unavailable at ${url}: ${reason}`
+      );
+
+      // Security rule: Never mock payments or receipts
+      if (
+        cleanEndpoint.startsWith('/receipts/upload') ||
+        cleanEndpoint.startsWith('/receipts/') ||
+        cleanEndpoint.includes('/payments')
+      ) {
+        throw new Error(
+          'Unable to connect to the backend service. Please ensure the server is running on http://localhost:8000.'
+        );
+      }
+
+      // Mock fallback can be disabled in production.
+      const allowMock =
+        typeof import.meta === 'undefined' ||
+        import.meta.env?.VITE_ENABLE_MOCK_FALLBACK !== 'false';
+
+      if (!allowMock) {
+        throw new Error(
+          `SplitMate API is currently offline (${reason}). Please check your connection and try again.`
+        );
+      }
+
+      return this.handleMockFallback(endpoint, {
+        ...options,
+        isTimeout: err.name === 'AbortError',
+      });
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
   /**
-   * Mock fallback handler for seamless demo resilience
+   * Resilient offline mock responder for core CRUD actions.
    */
-  async handleMockFallback(endpoint, options) {
-    await new Promise((r) => setTimeout(r, 400)); // Simulate realistic network latency
-
+  async handleMockFallback(endpoint, options = {}) {
+    await new Promise((resolve) => setTimeout(resolve, 80));
     const method = (options.method || 'GET').toUpperCase();
 
     // 1. Health
     if (endpoint === API_ENDPOINTS.HEALTH) {
-      return { status: 'healthy', version: '1.0.0-mock', service: 'SplitMate Mock Service' };
-    }
-
-    // 2. Auth Current User
-    if (endpoint === API_ENDPOINTS.AUTH.CURRENT_USER) {
-      return MOCK_USERS[0];
-    }
-
-    // 3. Groups List
-    if (endpoint === API_ENDPOINTS.GROUPS.LIST) {
-      if (method === 'GET') return MOCK_GROUPS;
-      if (method === 'POST') {
-        const body = JSON.parse(options.body || '{}');
-        const newGroup = {
-          id: `grp_${Date.now()}`,
-          name: body.name || 'New Group',
-          description: body.description || '',
-          category: body.category || 'General',
-          currency: body.currency || 'USD',
-          createdAt: new Date().toISOString().split('T')[0],
-          members: [
-            { userId: 'usr_dhruv', role: 'Admin' },
-            ...(body.memberIds || []).map((id) => ({ userId: id, role: 'Member' }))
-          ],
-          totalExpenses: 0,
-          userBalance: 0,
-        };
-        return newGroup;
-      }
-    }
-
-    // 4. Expenses List
-    if (endpoint === API_ENDPOINTS.EXPENSES.LIST) {
-      if (method === 'GET') return MOCK_EXPENSES;
-      if (method === 'POST') {
-        const body = JSON.parse(options.body || '{}');
-        const newExpense = {
-          id: `exp_${Date.now()}`,
-          groupId: body.groupId,
-          description: body.description,
-          amount: parseFloat(body.amount),
-          currency: body.currency || 'USD',
-          category: body.category || 'General',
-          paidBy: body.paidBy || 'usr_dhruv',
-          date: body.date || new Date().toISOString().split('T')[0],
-          receiptId: body.receiptId || null,
-          splitType: body.splitType || 'EQUAL',
-          splitDetails: body.splitDetails || []
-        };
-        return newExpense;
-      }
-    }
-
-    // 5. AI Receipt Extraction (Pawan's contract)
-    if (endpoint === API_ENDPOINTS.RECEIPTS.EXTRACT || endpoint === API_ENDPOINTS.RECEIPTS.UPLOAD) {
-      await new Promise((r) => setTimeout(r, 600));
       return {
-        receipt_id: `receipt_${Date.now()}`,
-        extraction_status: 'completed',
-      };
-    }
-
-    if (endpoint.startsWith('/receipts/') && method === 'GET') {
-      await new Promise((r) => setTimeout(r, 400));
-      return {
-        receipt_id: endpoint.split('/')[2] || `receipt_${Date.now()}`,
-        original_filename: 'demo-receipt.jpg',
-        merchant_name: 'Artisan Cafe & Grill',
-        currency: 'USD',
-        tax: 7.20,
-        subtotal: 78.50,
-        total: 97.70,
-        extraction_status: 'completed',
-        confidence: 0.97,
-        warnings: null,
-        missing_fields: null,
-        uncertain_fields: null,
-        is_user_reviewed: false,
-        created_at: new Date().toISOString(),
-        items: [
-          { id: 'ext_1', item_name: 'Signature Truffle Burger', quantity: 2, unit_price: 19.00, total_price: 38.00 },
-          { id: 'ext_2', item_name: 'Sweet Potato Truffle Fries', quantity: 1, unit_price: 11.50, total_price: 11.50 },
-          { id: 'ext_3', item_name: 'Artisan Lemonade', quantity: 2, unit_price: 7.00, total_price: 14.00 },
-          { id: 'ext_4', item_name: 'Chocolate Molten Cake', quantity: 1, unit_price: 15.00, total_price: 15.00 },
-        ]
-      };
-    }
-
-    if (endpoint.includes('/review') && method === 'PUT') {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        receipt_id: endpoint.split('/')[2],
-        original_filename: 'reviewed-receipt.jpg',
-        merchant_name: body.merchant_name,
-        currency: body.currency,
-        tax: body.tax,
-        subtotal: body.subtotal,
-        total: body.total,
-        extraction_status: 'completed',
-        confidence: 1.0,
-        warnings: null,
-        is_user_reviewed: true,
-        created_at: new Date().toISOString(),
-        items: (body.items || []).map((it, idx) => ({
-          id: `rev_${idx}`,
-          item_name: it.item_name,
-          quantity: it.quantity,
-          unit_price: it.unit_price,
-          total_price: it.total_price,
-        }))
-      };
-    }
-
-    // 6. PayPal Create Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        orderId: `ORDER-${Math.random().toString(36).substring(2, 11).toUpperCase()}`,
-        status: 'CREATED',
-        amount: body.amount,
-        currency: body.currency || 'USD',
-        approvalUrl: 'https://www.sandbox.paypal.com/checkoutnow?token=mock_sandbox_token'
-      };
-    }
-
-    // 7. PayPal Capture Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        captureId: `CAPTURE-${Math.random().toString(36).substring(2, 12).toUpperCase()}`,
-        orderId: body.orderId,
-        status: 'COMPLETED',
-        amount: body.amount,
-        payer: body.payerId,
-        receiver: body.receiverEmail,
+        status: 'mock_fallback',
         timestamp: new Date().toISOString(),
       };
     }
 
-    // Default fallback
-    return { ok: true, message: 'Simulated mock response' };
+    // 2. Auth
+    if (
+      endpoint === API_ENDPOINTS.AUTH.CURRENT_USER ||
+      endpoint === API_ENDPOINTS.AUTH.ME
+    ) {
+      return MOCK_USERS[0];
+    }
+
+    // 3. Groups
+    if (endpoint.startsWith('/groups')) {
+      if (method === 'GET') {
+        if (endpoint.includes('/members')) {
+          return MOCK_USERS.slice(0, 3);
+        }
+
+        return MOCK_GROUPS;
+      }
+
+      if (method === 'POST') {
+        if (endpoint.includes('/members')) {
+          return {
+            id: `usr_mock_${Date.now()}`,
+            name: 'New Member',
+            email: 'member@splitmate.demo',
+          };
+        }
+
+        const body = JSON.parse(options.body || '{}');
+
+        return {
+          id: `grp_mock_${Date.now()}`,
+          name: body.name || 'New Group',
+          created_at: new Date().toISOString(),
+        };
+      }
+    }
+
+    // 4. Expenses
+    if (endpoint.startsWith('/expenses')) {
+      if (method === 'GET') {
+        if (endpoint.includes('/splits')) {
+          return {
+            expense_id: 'mock_expense',
+            total_amount: 85.5,
+            currency: 'USD',
+            splits: MOCK_USERS.slice(0, 3).map((u, i) => ({
+              member_id: u.id,
+              member_name: u.name,
+              member_email: u.email,
+              amount: i === 0 ? 35.5 : 25.0,
+              currency: 'USD',
+            })),
+          };
+        }
+
+        return MOCK_EXPENSES;
+      }
+
+      if (method === 'POST') {
+        if (endpoint.includes('/assign')) {
+          return {
+            success: true,
+            assignments_count: 3,
+          };
+        }
+
+        if (endpoint.includes('/initialize-payments')) {
+          return [
+            {
+              id: 'mock_pay_1',
+              status: 'pending',
+              amount: 25.0,
+              currency: 'USD',
+            },
+          ];
+        }
+
+        const body = JSON.parse(options.body || '{}');
+
+        return {
+          id: `exp_mock_${Date.now()}`,
+          group_id: body.group_id,
+          total_amount: body.total_amount,
+          currency: body.currency || 'USD',
+          created_at: new Date().toISOString(),
+        };
+      }
+    }
+
+    // 5. Receipt extraction
+    // Do not return invented receipt data when the backend is unavailable.
+    if (
+      endpoint === API_ENDPOINTS.RECEIPTS.UPLOAD ||
+      endpoint.startsWith('/receipts/')
+    ) {
+      throw new Error(
+        'Unable to connect to the receipt extraction service. Please ensure the backend server is running and try again.'
+      );
+    }
+
+    // 6. PayPal create order
+    if (endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER) {
+      const body = JSON.parse(options.body || '{}');
+
+      return {
+        orderId: `ORDER-${Math.random()
+          .toString(36)
+          .substring(2, 11)
+          .toUpperCase()}`,
+        status: 'CREATED',
+        amount: body.amount,
+        currency: body.currency || 'USD',
+        approvalUrl:
+          'https://www.sandbox.paypal.com/checkoutnow?token=mock_sandbox_token',
+      };
+    }
+
+    // 7. Other payment endpoints
+    if (endpoint.startsWith('/payments')) {
+      if (endpoint.includes('/create-order')) {
+        return {
+          id: `pay_${Date.now()}`,
+          paypal_order_id: `MOCK-ORD-${Math.random()
+            .toString(36)
+            .substring(2, 10)
+            .toUpperCase()}`,
+          status: 'order_created',
+          amount: 25.0,
+          currency: 'USD',
+        };
+      }
+
+      if (endpoint.includes('/capture')) {
+        return {
+          id: `pay_${Date.now()}`,
+          paypal_order_id: 'MOCK-ORD-SUCCESS',
+          paypal_capture_id: `MOCK-CAP-${Math.random()
+            .toString(36)
+            .substring(2, 10)
+            .toUpperCase()}`,
+          status: 'captured',
+          amount: 25.0,
+          currency: 'USD',
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      message: 'Simulated fallback response',
+    };
   }
 }
 
