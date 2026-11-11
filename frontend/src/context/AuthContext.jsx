@@ -47,6 +47,7 @@ function mergeWithMockExtras(backendUser) {
 const AuthContext = createContext();
 
 export function AuthProvider({ children }) {
+<<<<<<< HEAD
   // Initialise from localStorage so page refresh keeps the user logged in.
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = localStorage.getItem(USER_KEY);
@@ -57,6 +58,20 @@ export function AuthProvider({ children }) {
   const [isAuthenticated, setIsAuthenticated] = useState(
     () => Boolean(localStorage.getItem(TOKEN_KEY))
   );
+=======
+  const [currentUser, setCurrentUser] = useState(() => {
+    const saved = localStorage.getItem('splitmate_auth_user');
+    return saved ? JSON.parse(saved) : MOCK_USERS[0];
+  });
+  const [token, setToken] = useState(() => {
+    return localStorage.getItem('splitmate_token') || null;
+  });
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    const authFlag = localStorage.getItem('splitmate_is_authenticated');
+    if (authFlag === 'false') return false;
+    return Boolean(localStorage.getItem('splitmate_token') || localStorage.getItem('splitmate_auth_user'));
+  });
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
   const [isLoading, setIsLoading] = useState(false);
 
   // Persist the user object so a page refresh doesn't blank the UI.
@@ -105,17 +120,47 @@ export function AuthProvider({ children }) {
   const login = async (email, password) => {
     setIsLoading(true);
     try {
+<<<<<<< HEAD
+=======
+      if (!email?.trim() || !password?.trim()) {
+        throw new Error('Please provide both email and password.');
+      }
+
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
       const result = await apiClient.request(API_ENDPOINTS.AUTH.LOGIN, {
         method: 'POST',
         body: JSON.stringify({ email, password }),
       });
 
+<<<<<<< HEAD
       // result = { access_token, token_type, user: { id, name, email, created_at } }
       saveToken(result.access_token);
       const user = mergeWithMockExtras(result.user);
       setCurrentUser(user);
       setIsAuthenticated(true);
       return { success: true, user };
+=======
+      if (result.access_token) {
+        setToken(result.access_token);
+        localStorage.setItem('splitmate_token', result.access_token);
+        apiClient.setAuthToken(result.access_token);
+      }
+
+      const user = result.user || MOCK_USERS.find((u) => u.email === email) || {
+        id: `usr_${Date.now()}`,
+        name: email.split('@')[0],
+        email: email.trim(),
+        avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+        paypalEmail: `${email.split('@')[0]}-sandbox@paypal.com`,
+        role: 'Team Member',
+      };
+
+      setCurrentUser(user);
+      setIsAuthenticated(true);
+      localStorage.setItem('splitmate_auth_user', JSON.stringify(user));
+      localStorage.setItem('splitmate_is_authenticated', 'true');
+      return { success: true, user, token: result.access_token };
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
     } catch (err) {
       return { success: false, error: err.message };
     } finally {
@@ -129,21 +174,54 @@ export function AuthProvider({ children }) {
   const register = async (userData) => {
     setIsLoading(true);
     try {
+<<<<<<< HEAD
+=======
+      if (!userData?.name?.trim() || !userData?.email?.trim() || !userData?.password?.trim()) {
+        throw new Error('Name, email, and password are required.');
+      }
+      if (userData.password.length < 4) {
+        throw new Error('Password must be at least 4 characters.');
+      }
+
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
       const result = await apiClient.request(API_ENDPOINTS.AUTH.REGISTER, {
         method: 'POST',
         body: JSON.stringify({
-          name: userData.name,
-          email: userData.email,
-          password: userData.password,
+          name: userData.name.trim(),
+          email: userData.email.trim(),
+          password: userData.password.trim(),
         }),
       });
 
+<<<<<<< HEAD
       // result = { access_token, token_type, user: { id, name, email, created_at } }
       saveToken(result.access_token);
       const user = mergeWithMockExtras(result.user);
       setCurrentUser(user);
       setIsAuthenticated(true);
       return { success: true, user };
+=======
+      if (result.access_token) {
+        setToken(result.access_token);
+        localStorage.setItem('splitmate_token', result.access_token);
+        apiClient.setAuthToken(result.access_token);
+      }
+
+      const user = result.user || {
+        id: `usr_${Date.now()}`,
+        name: userData.name.trim(),
+        email: userData.email.trim(),
+        avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+        paypalEmail: userData.paypalEmail?.trim() || `${userData.email.split('@')[0]}@sandbox.paypal.com`,
+        role: 'Team Member',
+      };
+
+      setCurrentUser(user);
+      setIsAuthenticated(true);
+      localStorage.setItem('splitmate_auth_user', JSON.stringify(user));
+      localStorage.setItem('splitmate_is_authenticated', 'true');
+      return { success: true, user, token: result.access_token };
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
     } catch (err) {
       return { success: false, error: err.message };
     } finally {
@@ -158,7 +236,12 @@ export function AuthProvider({ children }) {
     clearToken();
     setCurrentUser(null);
     setIsAuthenticated(false);
+<<<<<<< HEAD
   }, []);
+=======
+    localStorage.setItem('splitmate_is_authenticated', 'false');
+  };
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
 
   // -------------------------------------------------------------------------
   // updateProfile  (local only – no backend profile endpoint exists yet)

@@ -228,6 +228,7 @@ class ApiClient {
       return await response.json();
     } catch (err) {
       clearTimeout(timeoutId);
+<<<<<<< HEAD
 
       const isNetworkError =
         err.name === 'AbortError' ||
@@ -285,6 +286,34 @@ class ApiClient {
             err = retryError;
           }
         }
+=======
+      // Disable mock fallback for all payment routes:
+      // Real integration testing requires genuine backend errors, never synthetic IDs.
+      const isPaymentEndpoint =
+        typeof endpoint === 'string' &&
+        (endpoint.includes('/payments') || endpoint.includes('initialize-payments'));
+
+      if (isPaymentEndpoint) {
+        this.notifyStatus(false);
+        console.error(`[SplitMate API] Payment endpoint error (${url}): ${err.message}`);
+        throw err;
+      }
+
+      // If server is unreachable, timed out, or offline, mark backend offline and provide mock response
+      const isNetworkError =
+        err.name === 'AbortError' ||
+        err.name === 'TypeError' ||
+        err.message?.toLowerCase().includes('failed to fetch') ||
+        err.message?.toLowerCase().includes('fetch failed') ||
+        err.message?.toLowerCase().includes('networkerror') ||
+        err.message?.toLowerCase().includes('connection refused') ||
+        Boolean(err.cause);
+
+      if (isNetworkError) {
+        this.notifyStatus(false);
+        console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to resilient mock service.`);
+        return this.handleMockFallback(endpoint, options);
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
       }
 
       this.notifyStatus(false);

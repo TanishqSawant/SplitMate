@@ -777,6 +777,7 @@ export function ExpenseProvider({ children }) {
     setPayPalModal((prev) => ({ ...prev, isOpen: false, status: 'idle', error: null }));
   };
 
+<<<<<<< HEAD
   // Execute PayPal Payment Flow
   // Merge: HEAD has resilient mock fallback; origin/main has approval_url support and real capture endpoint
   const executePayPalPayment = async (paymentId) => {
@@ -784,6 +785,10 @@ export function ExpenseProvider({ children }) {
 
     setPayPalModal((prev) => ({ ...prev, status: 'initiating', error: null }));
 
+=======
+  // Fetch real payment history from backend (Tanay's GET /api/payments/history)
+  const fetchPaymentHistory = async () => {
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
     try {
       let captureId = null;
       let orderId = null;

@@ -18,6 +18,11 @@ import Badge from '../common/Badge';
 export default function PayPalPaymentModal() {
   const { payPalModal, closePayPalModal, executePayPalPayment } = useExpenses();
   const [copied, setCopied] = useState(false);
+<<<<<<< HEAD
+=======
+  const [captureTime] = useState(() => new Date().toLocaleTimeString());
+  const [sdkErrorMessage, setSdkErrorMessage] = useState(null);
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
 
   if (!payPalModal.isOpen) return null;
 
@@ -108,6 +113,7 @@ export default function PayPalPaymentModal() {
               </div>
             </div>
 
+<<<<<<< HEAD
             {/* Yellow PayPal Branded Button */}
             <button
               onClick={handleExecute}
@@ -120,6 +126,62 @@ export default function PayPalPaymentModal() {
 
             <p className="text-[11px] text-center text-slate-400">
               Payments are routed via Tanay's FastAPI Sandbox integration endpoints.
+=======
+            {/* Error badge if SDK or createOrder fails */}
+            {(sdkErrorMessage || error) && (
+              <div className="p-3 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 text-xs rounded-xl border border-rose-200 dark:border-rose-900 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{sdkErrorMessage || error}</span>
+              </div>
+            )}
+
+            {/* Official PayPal SDK Buttons */}
+            <div className="paypal-buttons-wrapper min-h-[48px] relative z-0">
+              <PayPalButtons
+                style={{
+                  layout: 'vertical',
+                  shape: 'rect',
+                  color: 'gold',
+                  label: 'paypal',
+                  height: 46,
+                }}
+                disabled={status !== 'idle'}
+                createOrder={async () => {
+                  setSdkErrorMessage(null);
+                  try {
+                    const orderId = await createPayPalOrder();
+                    return orderId;
+                  } catch (err) {
+                    const msg = err.detail || err.message || 'Failed to initiate PayPal order.';
+                    setSdkErrorMessage(msg);
+                    throw err;
+                  }
+                }}
+                onApprove={async (data) => {
+                  setSdkErrorMessage(null);
+                  try {
+                    await capturePayPalOrder(data.orderID);
+                  } catch (err) {
+                    const msg = err.detail || err.message || 'Payment capture failed.';
+                    setSdkErrorMessage(msg);
+                  }
+                }}
+                onCancel={(data) => {
+                  console.info('[PayPal SDK] Checkout cancelled by buyer:', data);
+                  setSdkErrorMessage('Checkout was cancelled. No funds were captured.');
+                }}
+                onError={(err) => {
+                  console.error('[PayPal SDK] Checkout error:', err);
+                  setSdkErrorMessage(
+                    err?.message || 'PayPal Sandbox encountered an error. Please verify Sandbox credentials and try again.'
+                  );
+                }}
+              />
+            </div>
+
+            <p className="text-[11px] text-center text-slate-400">
+              Securely processed via PayPal Sandbox Orders v2 & FastAPI server-side capture.
+>>>>>>> fbd9119 (Fix PayPal Sandbox integration and resolve merge conflicts)
             </p>
           </div>
         )}
