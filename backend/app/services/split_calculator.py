@@ -41,6 +41,9 @@ def is_expense_fully_assigned(expense: Expense) -> tuple[bool, str]:
 
     problems: list[str] = []
     for item in expense.receipt.items:
+        if item.quantity is None or item.total_price is None:
+            problems.append(f"'{item.item_name}' (insufficient price or quantity data)")
+            continue
         purchased = Decimal(str(item.quantity))
         assigned = assigned_totals.get(item.id, Decimal("0"))
         if assigned < purchased:
@@ -88,6 +91,15 @@ def calculate_splits_for_expense(
         item = db.get(ReceiptItem, item_id)
         if not item:
             continue
+
+        if item.quantity is None or item.total_price is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot calculate splits: item '{item.item_name}' has insufficient price or quantity data. "
+                    "Complete receipt review first."
+                ),
+            )
 
         total_shares = sum(a.share_quantity for a in assignments)
         if total_shares <= Decimal("0"):

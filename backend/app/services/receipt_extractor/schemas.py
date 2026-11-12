@@ -379,6 +379,8 @@ class ReceiptExtractionResult(BaseModel):
             "tax": str(self.tax) if self.tax is not None else None,
             "total": str(self.final_total) if self.final_total is not None else None,
             "items": items_payload,
+            "extraction_status": self.status,
+            "status": self.status,
         }
 
     def to_frontend_contract(self) -> dict[str, Any]:

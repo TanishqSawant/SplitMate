@@ -2,9 +2,10 @@
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -59,9 +60,9 @@ class ReceiptItemResponse(BaseModel):
     id: UUID
     receipt_id: UUID
     item_name: str
-    quantity: int
-    unit_price: Decimal
-    total_price: Decimal
+    quantity: Decimal | None = None
+    unit_price: Decimal | None = None
+    total_price: Decimal | None = None
 
     model_config = {"from_attributes": True}
 
@@ -69,11 +70,11 @@ class ReceiptItemResponse(BaseModel):
 class ReceiptResponse(BaseModel):
     id: UUID
     original_filename: str
-    merchant_name: str | None
-    currency: str
-    subtotal: Decimal | None
-    tax: Decimal | None
-    total: Decimal | None
+    merchant_name: str | None = None
+    currency: str | None = None
+    subtotal: Decimal | None = None
+    tax: Decimal | None = None
+    total: Decimal | None = None
     extraction_status: str
     created_at: datetime
     items: list[ReceiptItemResponse] = []
@@ -84,19 +85,48 @@ class ReceiptResponse(BaseModel):
 class ReceiptItemExtraction(BaseModel):
     """A single extracted item from the receipt (sent by Pawan's AI service)."""
     item_name: str = Field(..., min_length=1, max_length=255)
-    quantity: int = Field(..., ge=1)
-    unit_price: Decimal = Field(..., ge=0, decimal_places=2)
-    total_price: Decimal = Field(..., ge=0, decimal_places=2)
+    quantity: Decimal | None = Field(default=None, gt=0)
+    unit_price: Decimal | None = Field(default=None, ge=0, decimal_places=2)
+    total_price: Decimal | None = Field(default=None, ge=0, decimal_places=2)
 
 
 class ReceiptExtractionRequest(BaseModel):
     """Payload that Pawan's AI extraction service submits after processing a receipt."""
-    merchant_name: str = Field(..., min_length=1, max_length=255, examples=["Mario's Pizzeria"])
-    currency: str = Field(default="USD", min_length=3, max_length=3)
-    subtotal: Decimal = Field(..., ge=0, decimal_places=2, examples=[45.50])
-    tax: Decimal = Field(..., ge=0, decimal_places=2, examples=[3.64])
-    total: Decimal = Field(..., ge=0, decimal_places=2, examples=[49.14])
-    items: list[ReceiptItemExtraction] = Field(..., min_length=1)
+    merchant_name: str | None = Field(default=None, max_length=255, examples=["Mario's Pizzeria"])
+    currency: str | None = Field(default=None, max_length=3)
+    subtotal: Decimal | None = Field(default=None, ge=0, decimal_places=2, examples=[45.50])
+    tax: Decimal | None = Field(default=None, ge=0, decimal_places=2, examples=[3.64])
+    total: Decimal | None = Field(default=None, ge=0, decimal_places=2, examples=[49.14])
+    items: list[ReceiptItemExtraction] = Field(default_factory=list)
+    extraction_status: str | None = Field(default=None, description="AI extraction status: completed, review_required, or failed")
+    status: str | None = Field(default=None, description="Alias for extraction_status")
+
+    @field_validator("merchant_name", mode="before")
+    @classmethod
+    def clean_merchant_name(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            stripped = v.strip()
+            return stripped if stripped else None
+        return str(v)
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def clean_currency(cls, v: Any) -> str | None:
+        if v is None or v == "":
+            return None
+        return str(v).strip().upper()
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_status_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "status" in data and not data.get("extraction_status"):
+                data["extraction_status"] = data["status"]
+            elif "extraction_status" in data and not data.get("status"):
+                data["status"] = data["extraction_status"]
+        return data
 
 
 # ---------------------------------------------------------------------------

@@ -737,3 +737,243 @@ def test_initialize_payments_succeeds_when_fully_assigned(client):
     resp = client.post(f"/api/expenses/{expense_id}/initialize-payments")
     assert resp.status_code == 201
     assert len(resp.json()) == 2
+
+
+# ---------------------------------------------------------------------------
+# Fractional & Incomplete Item Splitting Tests
+# ---------------------------------------------------------------------------
+
+def test_create_expense_fails_when_receipt_review_required(client):
+    """Receipt with review_required status blocks expense creation."""
+    group_id, member_ids = _setup_group_with_members(client, ["Alice", "Bob"])
+
+    # Upload receipt and submit incomplete extraction
+    upload_resp = client.post(
+        "/api/receipts/upload",
+        files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
+    )
+    receipt_id = upload_resp.json()["id"]
+
+    client.post(
+        f"/api/receipts/{receipt_id}/extraction",
+        json={
+            "merchant_name": None,
+            "currency": "USD",
+            "subtotal": None,
+            "tax": None,
+            "total": "20.00",
+            "items": [],
+            "extraction_status": "review_required",
+        },
+        headers=AI_KEY_HEADER,
+    )
+
+    # Attempt to create expense referencing this receipt
+    resp = client.post(
+        "/api/expenses",
+        json={
+            "group_id": group_id,
+            "receipt_id": receipt_id,
+            "total_amount": "20.00",
+            "currency": "USD",
+        },
+    )
+    assert resp.status_code == 400
+    assert "Receipt extraction has not completed yet" in resp.json()["detail"]
+
+
+def test_assign_item_fails_when_item_has_insufficient_data(client):
+    """Cannot assign or split an item that lacks price or quantity data."""
+    group_id, member_ids = _setup_group_with_members(client, ["Alice", "Bob"])
+
+    # Upload and submit extraction with one incomplete item
+    upload_resp = client.post(
+        "/api/receipts/upload",
+        files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
+    )
+    receipt_id = upload_resp.json()["id"]
+
+    ext_resp = client.post(
+        f"/api/receipts/{receipt_id}/extraction",
+        json={
+            "merchant_name": "Test Store",
+            "currency": "USD",
+            "subtotal": None,
+            "tax": None,
+            "total": "30.00",
+            "items": [
+                {
+                    "item_name": "Mystery Product",
+                    "quantity": None,
+                    "unit_price": None,
+                    "total_price": None,
+                }
+            ],
+            "extraction_status": "review_required",
+        },
+        headers=AI_KEY_HEADER,
+    )
+    item_id = ext_resp.json()["items"][0]["id"]
+
+    # Create a manual expense in the group
+    expense_resp = client.post(
+        "/api/expenses",
+        json={
+            "group_id": group_id,
+            "total_amount": "30.00",
+            "currency": "USD",
+        },
+    )
+    expense_id = expense_resp.json()["id"]
+
+    # Attempting to assign the unpriced/unquantified item must fail
+    assign_resp = client.post(
+        f"/api/expenses/{expense_id}/assign",
+        json={
+            "assignments": [
+                {
+                    "receipt_item_id": item_id,
+                    "member_id": member_ids[0],
+                    "share_quantity": "1",
+                }
+            ]
+        },
+    )
+    assert assign_resp.status_code == 400
+    assert "insufficient price or quantity data" in assign_resp.json()["detail"]
+
+
+def test_itemized_splitting_with_fractional_item_quantity(client):
+    """Splitting items with fractional purchased quantities calculates exact shares."""
+    group_id, member_ids = _setup_group_with_members(client, ["Alice", "Bob"])
+
+    upload_resp = client.post(
+        "/api/receipts/upload",
+        files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
+    )
+    receipt_id = upload_resp.json()["id"]
+
+    # Receipt with fractional item: 2.5 kg at $10/kg = $25.00, tax $2.50, total $27.50
+    ext_resp = client.post(
+        f"/api/receipts/{receipt_id}/extraction",
+        json={
+            "merchant_name": "Bulk Market",
+            "currency": "USD",
+            "subtotal": "25.00",
+            "tax": "2.50",
+            "total": "27.50",
+            "items": [
+                {
+                    "item_name": "Bulk Cheese",
+                    "quantity": "2.5",
+                    "unit_price": "10.00",
+                    "total_price": "25.00",
+                }
+            ],
+        },
+        headers=AI_KEY_HEADER,
+    )
+    item_id = ext_resp.json()["items"][0]["id"]
+
+    expense_resp = client.post(
+        "/api/expenses",
+        json={
+            "group_id": group_id,
+            "receipt_id": receipt_id,
+            "total_amount": "27.50",
+            "currency": "USD",
+        },
+    )
+    expense_id = expense_resp.json()["id"]
+
+    # Alice takes 1.0 kg (40%), Bob takes 1.5 kg (60%)
+    assign_resp = client.post(
+        f"/api/expenses/{expense_id}/assign",
+        json={
+            "assignments": [
+                {
+                    "receipt_item_id": item_id,
+                    "member_id": member_ids[0],
+                    "share_quantity": "1.0",
+                },
+                {
+                    "receipt_item_id": item_id,
+                    "member_id": member_ids[1],
+                    "share_quantity": "1.5",
+                },
+            ]
+        },
+    )
+    assert assign_resp.status_code == 201
+
+    # Check splits: Alice gets 40% ($11.00), Bob gets 60% ($16.50)
+    splits_resp = client.get(f"/api/expenses/{expense_id}/splits")
+    assert splits_resp.status_code == 200
+    splits = {s["member_name"]: Decimal(str(s["amount"])) for s in splits_resp.json()["splits"]}
+    assert splits["Alice"] == Decimal("11.00")
+    assert splits["Bob"] == Decimal("16.50")
+    assert sum(splits.values()) == Decimal("27.50")
+
+
+def test_assign_fractional_item_capacity_limit(client):
+    """Enforce capacity check when assigning fractional items."""
+    group_id, member_ids = _setup_group_with_members(client, ["Alice", "Bob"])
+
+    upload_resp = client.post(
+        "/api/receipts/upload",
+        files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
+    )
+    receipt_id = upload_resp.json()["id"]
+
+    ext_resp = client.post(
+        f"/api/receipts/{receipt_id}/extraction",
+        json={
+            "merchant_name": "Deli",
+            "currency": "USD",
+            "subtotal": "15.00",
+            "tax": "0.00",
+            "total": "15.00",
+            "items": [
+                {
+                    "item_name": "Roast Beef",
+                    "quantity": "1.5",
+                    "unit_price": "10.00",
+                    "total_price": "15.00",
+                }
+            ],
+        },
+        headers=AI_KEY_HEADER,
+    )
+    item_id = ext_resp.json()["items"][0]["id"]
+
+    expense_resp = client.post(
+        "/api/expenses",
+        json={
+            "group_id": group_id,
+            "receipt_id": receipt_id,
+            "total_amount": "15.00",
+            "currency": "USD",
+        },
+    )
+    expense_id = expense_resp.json()["id"]
+
+    # Assigning 1.0 + 0.6 = 1.6 > 1.5 must fail
+    assign_resp = client.post(
+        f"/api/expenses/{expense_id}/assign",
+        json={
+            "assignments": [
+                {
+                    "receipt_item_id": item_id,
+                    "member_id": member_ids[0],
+                    "share_quantity": "1.0",
+                },
+                {
+                    "receipt_item_id": item_id,
+                    "member_id": member_ids[1],
+                    "share_quantity": "0.6",
+                },
+            ]
+        },
+    )
+    assert assign_resp.status_code == 400
+    assert "exceeds purchased quantity" in assign_resp.json()["detail"]

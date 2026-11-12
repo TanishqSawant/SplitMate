@@ -184,7 +184,27 @@ def submit_extraction(
     receipt.subtotal = body.subtotal
     receipt.tax = body.tax
     receipt.total = body.total
-    receipt.extraction_status = ExtractionStatus.COMPLETED
+
+    # Determine status safely: incomplete extractions must NOT be marked COMPLETED
+    status_str = (body.extraction_status or body.status or "").lower()
+    is_incomplete = (
+        status_str == ExtractionStatus.REVIEW_REQUIRED.value
+        or not body.merchant_name
+        or not body.merchant_name.strip()
+        or body.total is None
+        or not body.items
+        or any(
+            item.quantity is None or item.total_price is None
+            for item in body.items
+        )
+    )
+
+    if status_str == ExtractionStatus.FAILED.value:
+        receipt.extraction_status = ExtractionStatus.FAILED
+    elif is_incomplete:
+        receipt.extraction_status = ExtractionStatus.REVIEW_REQUIRED
+    else:
+        receipt.extraction_status = ExtractionStatus.COMPLETED
 
     # Delete any prior items and insert fresh
     for old_item in receipt.items:

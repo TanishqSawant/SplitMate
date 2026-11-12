@@ -65,6 +65,7 @@ class ExtractionStatus(str, enum.Enum):
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
+    REVIEW_REQUIRED = "review_required"
     FAILED = "failed"
 
 
@@ -140,7 +141,7 @@ class Receipt(Base):
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_file_path: Mapped[str] = mapped_column(Text, nullable=False)
     merchant_name: Mapped[str | None] = mapped_column(String(255))
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    currency: Mapped[str | None] = mapped_column(String(3), default="USD", nullable=True)
     subtotal: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     tax: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     total: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
@@ -174,9 +175,9 @@ class ReceiptItem(Base):
         nullable=False,
     )
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    quantity: Mapped[int] = mapped_column(default=1, nullable=False)
-    unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    total_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    quantity: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    total_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Relationships
     receipt: Mapped["Receipt"] = relationship(back_populates="items")
@@ -186,9 +187,9 @@ class ReceiptItem(Base):
 
     __table_args__ = (
         Index("ix_receipt_items_receipt_id", "receipt_id"),
-        CheckConstraint("quantity > 0", name="ck_receipt_items_quantity_positive"),
-        CheckConstraint("unit_price >= 0", name="ck_receipt_items_unit_price_non_negative"),
-        CheckConstraint("total_price >= 0", name="ck_receipt_items_total_price_non_negative"),
+        CheckConstraint("quantity IS NULL OR quantity > 0", name="ck_receipt_items_quantity_positive"),
+        CheckConstraint("unit_price IS NULL OR unit_price >= 0", name="ck_receipt_items_unit_price_non_negative"),
+        CheckConstraint("total_price IS NULL OR total_price >= 0", name="ck_receipt_items_total_price_non_negative"),
     )
 
 
