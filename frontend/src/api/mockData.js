@@ -23,7 +23,7 @@ export const MOCK_USERS = [
   },
   {
     id: 'usr_pawan',
-    name: 'Pawan Kumar',
+    name: 'Pawan Mandare',
     email: 'pawan@splitmate.io',
     avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150&auto=format&fit=crop&q=80',
     paypalEmail: 'pawan-buyer@sandbox.paypal.com',
@@ -31,7 +31,7 @@ export const MOCK_USERS = [
   },
   {
     id: 'usr_tanay',
-    name: 'Tanay Gupta',
+    name: 'Tanay Padwal',
     email: 'tanay@splitmate.io',
     avatar: 'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?w=150&auto=format&fit=crop&q=80',
     paypalEmail: 'tanay-sandbox@sandbox.paypal.com',
@@ -39,7 +39,7 @@ export const MOCK_USERS = [
   },
   {
     id: 'usr_sunil',
-    name: 'Sunil Verma',
+    name: 'Sunil Ramoshi',
     email: 'sunil@splitmate.io',
     avatar: 'https://images.unsplash.com/photo-1492562080023-ab3db95bfbce?w=150&auto=format&fit=crop&q=80',
     paypalEmail: 'sunil-qa@sandbox.paypal.com',
@@ -276,7 +276,7 @@ export const MOCK_PAYPAL_TRANSACTIONS = [
     payerId: 'usr_dhruv',
     payerName: 'Dhruv Patil',
     receiverId: 'usr_tanay',
-    receiverName: 'Tanay Gupta',
+    receiverName: 'Tanay Padwal',
     receiverEmail: 'tanay-sandbox@sandbox.paypal.com',
     amount: 25.00,
     currency: 'USD',

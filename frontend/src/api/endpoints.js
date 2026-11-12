@@ -1,63 +1,90 @@
 /**
- * SplitMate API Contract & Endpoints
- * 
- * Agreed REST API contracts for FastAPI backend (Tanishq),
- * AI receipt extraction (Pawan), and PayPal Sandbox (Tanay).
+ * Centralized API Endpoint Definitions for SplitMate
+ *
+ * All frontend requests route through these canonical paths.
+ * Paths are relative to BASE_URL (http://127.0.0.1:8000/api).
  */
 
 export const API_ENDPOINTS = {
-  // Backend Health & System Status (Tanishq)
+  // System Health
   HEALTH: '/health',
 
-  // Authentication & User Profile (Tanishq)
+  // Authentication & Users
   AUTH: {
-    LOGIN: '/auth/login',
     REGISTER: '/auth/register',
+    LOGIN: '/auth/login',
+    ME: '/auth/me',
     CURRENT_USER: '/auth/me',
     UPDATE_PROFILE: '/auth/profile',
+    LOGOUT: '/auth/logout',
   },
 
-  // Groups & Members (Tanishq)
+  // Groups & Members
   GROUPS: {
     LIST: '/groups',
     CREATE: '/groups',
     DETAILS: (groupId) => `/groups/${groupId}`,
     ADD_MEMBER: (groupId) => `/groups/${groupId}/members`,
+    MEMBERS: (groupId) => `/groups/${groupId}/members`,
     BALANCES: (groupId) => `/groups/${groupId}/balances`,
   },
 
-  // Expense Management (Tanishq)
+  // Expense Management
   EXPENSES: {
     LIST: '/expenses',
+    LIST_BY_GROUP: (groupId) => `/expenses/group/${groupId}`,
     CREATE: '/expenses',
     DETAILS: (expenseId) => `/expenses/${expenseId}`,
+    ASSIGN: (expenseId) => `/expenses/${expenseId}/assign`,
+    SPLITS: (expenseId) => `/expenses/${expenseId}/splits`,
+    INITIALIZE_PAYMENTS: (expenseId) =>
+      `/expenses/${expenseId}/initialize-payments`,
     DELETE: (expenseId) => `/expenses/${expenseId}`,
     SETTLE: '/expenses/settle',
   },
 
-  // AI Receipt Extraction (Pawan + Tanishq)
-  // Backend contract (receipts.py):
-  //   POST /api/receipts/upload           → upload file, returns {id, extraction_status: 'PENDING'}
-  //   GET  /api/receipts/{receipt_id}     → poll status; extraction_status becomes 'COMPLETED' once Pawan's AI service processes it
-  //   POST /api/receipts/{receipt_id}/extraction → Pawan's AI service submits results (internal, not called by frontend)
+  // AI Receipt Extraction & Review
   RECEIPTS: {
     UPLOAD: '/receipts/upload',
+    EXTRACT: (receiptId) => `/receipts/${receiptId}/extract`,
+    DETAILS: (receiptId) => `/receipts/${receiptId}`,
     GET: (receiptId) => `/receipts/${receiptId}`,
-    SUBMIT_EXTRACTION: (receiptId) => `/receipts/${receiptId}/extraction`,
+    REVIEW: (receiptId) => `/receipts/${receiptId}/review`,
+    IMAGE: (receiptId) => `/receipts/${receiptId}/image`,
+    UPDATE_ITEMS: (receiptId) => `/receipts/${receiptId}/items`,
+    SUBMIT_EXTRACTION: (receiptId) =>
+      `/receipts/${receiptId}/extraction`,
+    SAMPLE_RECEIPTS: '/receipts/samples',
   },
 
-  // PayPal Sandbox Integration (Tanay)
+  // PayPal Sandbox Integration (Tanay & Dhruv - Phase 9)
+  // Backend contract (payments.py):
+  //   POST /api/payments/{payment_id}/create-order  → creates PayPal order (status: pending -> order_created)
+  //   POST /api/payments/{payment_id}/capture       → captures order server-side (status: order_created -> captured)
+  //   GET  /api/payments/{payment_id}               → checks verified status
   PAYMENTS: {
-    CREATE_ORDER: '/payments/paypal/create-order',
-    CAPTURE_ORDER: '/payments/paypal/capture-order',
+    CREATE_ORDER: (paymentId) =>
+      `/payments/${paymentId}/create-order`,
+    CREATE_ORDER_FOR_PAYMENT: (paymentId) =>
+      `/payments/${paymentId}/create-order`,
+    CAPTURE: (paymentId) =>
+      `/payments/${paymentId}/capture`,
+    CAPTURE_FOR_PAYMENT: (paymentId) =>
+      `/payments/${paymentId}/capture`,
+    CAPTURE_ORDER: (paymentId) =>
+      paymentId ? `/payments/${paymentId}/capture` : '/payments/paypal/capture-order',
+    DETAILS: (paymentId) => `/payments/${paymentId}`,
+    GET: (paymentId) => `/payments/${paymentId}`,
     HISTORY: '/payments/history',
+    LIST_BY_EXPENSE: (expenseId) =>
+      `/payments/expense/${expenseId}`,
+    PAYPAL_CREATE_DIRECT: '/payments/paypal/create-order',
+    PAYPAL_CAPTURE_DIRECT: '/payments/paypal/capture-order',
   },
 
-  // Analytics & Insights (Tanishq / Dhruv)
+  // Analytics & Insights
   ANALYTICS: {
     SUMMARY: '/analytics/summary',
     CATEGORIES: '/analytics/categories',
-    DEBT_GRAPH: '/analytics/debt-simplification',
-  }
+  },
 };
-

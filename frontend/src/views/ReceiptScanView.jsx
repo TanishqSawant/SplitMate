@@ -1,5 +1,13 @@
 import React from 'react';
-import { Sparkles, RotateCcw, UploadCloud, Clock, AlertTriangle, ServerCrash, WifiOff } from 'lucide-react';
+import {
+  Sparkles,
+  RotateCcw,
+  UploadCloud,
+  Clock,
+  AlertTriangle,
+  ServerCrash,
+  WifiOff,
+} from 'lucide-react';
 import { useExpenses } from '../context/ExpenseContext';
 import ReceiptUploader from '../components/receipt/ReceiptUploader';
 import ReceiptPreview from '../components/receipt/ReceiptPreview';
@@ -11,19 +19,30 @@ import Badge from '../components/common/Badge';
 // Categorise the error message to pick the right icon and contextual advice
 function classifyError(errorMsg) {
   const msg = (errorMsg || '').toLowerCase();
-  if (msg.includes('unable to connect') || msg.includes('unreachable') || msg.includes('failed to fetch') || msg.includes('econnrefused')) {
+  if (
+    msg.includes('unable to connect') ||
+    msg.includes('unreachable') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('econnrefused')
+  ) {
     return {
       icon: WifiOff,
       title: 'Backend Service Offline',
-      advice: 'The SplitMate backend server is not reachable at http://localhost:8000. Ask Tanishq to start the FastAPI server, then retry.',
+      advice:
+        'The SplitMate backend server is not reachable at http://localhost:8000. Ask Tanishq to start the FastAPI server, then retry.',
       color: 'amber',
     };
   }
-  if (msg.includes('not appear to contain') || msg.includes('not a receipt') || msg.includes('invalid image')) {
+  if (
+    msg.includes('not appear to contain') ||
+    msg.includes('not a receipt') ||
+    msg.includes('invalid image')
+  ) {
     return {
       icon: AlertTriangle,
       title: 'Not a Valid Receipt',
-      advice: 'The uploaded image does not appear to be a receipt. Please upload a clear photo of a restaurant bill, store receipt, or invoice.',
+      advice:
+        'The uploaded image does not appear to be a receipt. Please upload a clear photo of a restaurant bill, store receipt, or invoice.',
       color: 'orange',
     };
   }
@@ -31,7 +50,8 @@ function classifyError(errorMsg) {
     return {
       icon: AlertTriangle,
       title: 'Image Too Blurry',
-      advice: 'The receipt image is unclear. Please take a fresh, well-lit photo and try again.',
+      advice:
+        'The receipt image is unclear. Please take a fresh, well-lit photo and try again.',
       color: 'orange',
     };
   }
@@ -39,21 +59,28 @@ function classifyError(errorMsg) {
     return {
       icon: AlertTriangle,
       title: 'File Too Large',
-      advice: 'The file exceeds the 10 MB limit. Compress or resize the image and try again.',
+      advice:
+        'The file exceeds the 10 MB limit. Compress or resize the image and try again.',
       color: 'orange',
     };
   }
   return {
     icon: ServerCrash,
     title: 'Extraction Failed',
-    advice: 'An unexpected error occurred during extraction. Please try again, or contact Pawan if the problem persists.',
+    advice:
+      'An unexpected error occurred during extraction. Please try again, or contact Pawan if the problem persists.',
     color: 'rose',
   };
 }
 
 export default function ReceiptScanView({ onNavigate }) {
   const { receiptScan, resetReceiptScan, processReceiptFile } = useExpenses();
-  const { icon: ErrorIcon, title: errorTitle, advice: errorAdvice, color: errorColor } = classifyError(receiptScan.error);
+  const {
+    icon: ErrorIcon,
+    title: errorTitle,
+    advice: errorAdvice,
+    color: errorColor,
+  } = classifyError(receiptScan.error);
 
   const colorMap = {
     amber: {
@@ -118,7 +145,7 @@ export default function ReceiptScanView({ onNavigate }) {
         <ReceiptUploader />
       )}
 
-      {/* PENDING: AI service is working, polling timed out waiting for Pawan's callback */}
+      {/* PENDING: AI service is working, polling timed out waiting for backend callback */}
       {receiptScan.status === 'pending' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 border border-blue-200 dark:border-blue-900/60 text-center max-w-lg mx-auto space-y-4">
           <div className="w-14 h-14 rounded-full bg-blue-50 dark:bg-blue-950/60 text-blue-600 mx-auto flex items-center justify-center">
@@ -128,7 +155,7 @@ export default function ReceiptScanView({ onNavigate }) {
             AI Extraction In Progress
           </h3>
           <p className="text-sm text-slate-600 dark:text-slate-400">
-            Your receipt was uploaded successfully. Pawan's AI service is processing it — this usually takes under 30 seconds.
+            Your receipt was uploaded successfully. SplitMate's AI vision service is processing it — this usually takes under 30 seconds.
           </p>
           <p className="text-xs text-blue-600 dark:text-blue-400 font-mono">
             Receipt ID: {receiptScan.receiptId}

@@ -4,8 +4,10 @@ import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.models import (
     Expense,
@@ -17,19 +19,55 @@ from app.models.models import (
     Receipt,
     ReceiptItem,
     ExtractionStatus,
+    User,
 )
 from app.schemas.schemas import (
     AssignmentBatchRequest,
     AssignmentResponse,
     ExpenseCreate,
     ExpenseResponse,
+    ExpenseUpdate,
     MemberSplit,
     PaymentResponse,
     SplitsResponse,
 )
+from app.services.authorization import (
+    require_expense_access,
+    require_group_membership,
+    require_receipt_access,
+)
 from app.services.split_calculator import calculate_splits_for_expense, is_expense_fully_assigned
 
 router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
+
+
+@router.get(
+    "",
+    response_model=list[ExpenseResponse],
+    summary="List all expenses for groups the current user belongs to",
+)
+def list_my_expenses(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Get all groups user belongs to
+    normalized_email = current_user.email.strip().lower()
+    user_groups = (
+        db.query(ExpenseGroup)
+        .outerjoin(GroupMember, ExpenseGroup.id == GroupMember.group_id)
+        .filter(
+            (ExpenseGroup.creator_id == current_user.id)
+            | (GroupMember.user_id == current_user.id)
+            | (func.lower(GroupMember.email) == normalized_email)
+        )
+        .distinct()
+        .all()
+    )
+    group_ids = [g.id for g in user_groups]
+
+    # Get all expenses for those groups
+    expenses = db.query(Expense).filter(Expense.group_id.in_(group_ids)).order_by(Expense.created_at.desc()).all()
+    return expenses
 
 
 @router.post(
@@ -38,17 +76,17 @@ router = APIRouter(prefix="/api/expenses", tags=["Expenses"])
     status_code=status.HTTP_201_CREATED,
     summary="Create an expense linked to a group and optionally a receipt",
 )
-def create_expense(body: ExpenseCreate, db: Session = Depends(get_db)):
-    # Validate group
-    group = db.get(ExpenseGroup, body.group_id)
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found.")
+def create_expense(
+    body: ExpenseCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Validate group membership (IDOR protection)
+    group = require_group_membership(db, body.group_id, current_user)
 
-    # Fix 1: Validate receipt if provided
+    # Fix 1 & IDOR: Validate receipt access if provided
     if body.receipt_id:
-        receipt = db.get(Receipt, body.receipt_id)
-        if not receipt:
-            raise HTTPException(status_code=404, detail="Receipt not found.")
+        receipt = require_receipt_access(db, body.receipt_id, current_user)
 
         # Receipt extraction must be complete before an expense can be created
         if receipt.extraction_status != ExtractionStatus.COMPLETED:
@@ -86,15 +124,91 @@ def create_expense(body: ExpenseCreate, db: Session = Depends(get_db)):
 
 
 @router.get(
+    "/group/{group_id}",
+    response_model=list[ExpenseResponse],
+    summary="List all expenses belonging to an expense group",
+)
+def list_group_expenses(group_id: uuid.UUID, db: Session = Depends(get_db)):
+    group = db.get(ExpenseGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found.")
+    return db.query(Expense).filter(Expense.group_id == group_id).order_by(Expense.created_at.desc()).all()
+
+
+@router.get(
+    "",
+    response_model=list[ExpenseResponse],
+    summary="List all expenses",
+)
+def list_all_expenses(db: Session = Depends(get_db)):
+    return db.query(Expense).order_by(Expense.created_at.desc()).all()
+
+
+@router.get(
     "/{expense_id}",
     response_model=ExpenseResponse,
     summary="Get an expense by ID",
 )
-def get_expense(expense_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_expense(
+    expense_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    expense = require_expense_access(db, expense_id, current_user)
+    return expense
+
+
+@router.put(
+    "/{expense_id}",
+    response_model=ExpenseResponse,
+    summary="Update an expense",
+)
+def update_expense(
+    expense_id: uuid.UUID,
+    body: ExpenseUpdate,
+    db: Session = Depends(get_db),
+):
     expense = db.get(Expense, expense_id)
     if not expense:
         raise HTTPException(status_code=404, detail="Expense not found.")
+
+    for p in expense.payments:
+        if p.status == PaymentStatus.CAPTURED:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot edit expense: payment has already been captured.",
+            )
+
+    if body.total_amount is not None:
+        expense.total_amount = body.total_amount
+    if body.currency is not None:
+        expense.currency = body.currency
+
+    db.commit()
+    db.refresh(expense)
     return expense
+
+
+@router.delete(
+    "/{expense_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete an expense",
+)
+def delete_expense(expense_id: uuid.UUID, db: Session = Depends(get_db)):
+    expense = db.get(Expense, expense_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found.")
+
+    for p in expense.payments:
+        if p.status == PaymentStatus.CAPTURED:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot delete expense: payment has already been captured.",
+            )
+
+    db.delete(expense)
+    db.commit()
+    return None
 
 
 @router.post(
@@ -107,10 +221,9 @@ def assign_items(
     expense_id: uuid.UUID,
     body: AssignmentBatchRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    expense = db.get(Expense, expense_id)
-    if not expense:
-        raise HTTPException(status_code=404, detail="Expense not found.")
+    expense = require_expense_access(db, expense_id, current_user)
 
     # Map existing assignments for upsert and quantity tracking
     existing_map: dict[tuple[uuid.UUID, uuid.UUID], ExpenseAssignment] = {
@@ -210,10 +323,12 @@ def assign_items(
     response_model=SplitsResponse,
     summary="Calculate each member's share based on assignments (Idempotent, Read-Only)",
 )
-def get_splits(expense_id: uuid.UUID, db: Session = Depends(get_db)):
-    expense = db.get(Expense, expense_id)
-    if not expense:
-        raise HTTPException(status_code=404, detail="Expense not found.")
+def get_splits(
+    expense_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    expense = require_expense_access(db, expense_id, current_user)
 
     calculated = calculate_splits_for_expense(expense, db)
 
@@ -244,10 +359,12 @@ def get_splits(expense_id: uuid.UUID, db: Session = Depends(get_db)):
     status_code=status.HTTP_201_CREATED,
     summary="Initialize or update pending payments for each member in the split",
 )
-def initialize_payments(expense_id: uuid.UUID, db: Session = Depends(get_db)):
-    expense = db.get(Expense, expense_id)
-    if not expense:
-        raise HTTPException(status_code=404, detail="Expense not found.")
+def initialize_payments(
+    expense_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    expense = require_expense_access(db, expense_id, current_user)
 
     # Fix 4: Block payment initialization if any receipt items are unassigned / partially assigned
     if expense.receipt_id:

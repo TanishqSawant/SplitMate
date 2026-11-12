@@ -1,6 +1,8 @@
+/* oxlint-disable react/only-export-components */
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 const ThemeContext = createContext();
+export default ThemeContext;
 
 export function ThemeProvider({ children }) {
   const [theme, setTheme] = useState(() => {

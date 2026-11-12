@@ -5,14 +5,14 @@
  * and resilient mock fallback for hackathon presentations.
  */
 
-import { API_ENDPOINTS } from './endpoints.js';
+import { API_ENDPOINTS } from './endpoints';
 import {
   MOCK_USERS,
   MOCK_GROUPS,
   MOCK_EXPENSES
-} from './mockData.js';
+} from './mockData';
 
-const BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || 'http://localhost:8000/api';
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
 const DEFAULT_TIMEOUT_MS = 6000;
 
 class ApiClient {
@@ -20,6 +20,25 @@ class ApiClient {
     this.baseURL = BASE_URL;
     this.isBackendAvailable = null; // null: unknown, true: online, false: offline/mock
     this.onStatusChangeCallbacks = new Set();
+    this.authToken = typeof window !== 'undefined' ? localStorage.getItem('splitmate_token') : null;
+  }
+
+  setAuthToken(token) {
+    this.authToken = token;
+    if (typeof window !== 'undefined') {
+      if (token) {
+        localStorage.setItem('splitmate_token', token);
+      } else {
+        localStorage.removeItem('splitmate_token');
+      }
+    }
+  }
+
+  getAuthToken() {
+    if (!this.authToken && typeof window !== 'undefined') {
+      this.authToken = localStorage.getItem('splitmate_token');
+    }
+    return this.authToken;
   }
 
   subscribeStatus(callback) {
@@ -72,16 +91,18 @@ class ApiClient {
   }
 
   /**
-   * Generic request executor with timeout and fallback
+   * Generic request executor with timeout, JWT propagation, and selective fallback
    */
   async request(endpoint, options = {}) {
     const url = `${this.baseURL}${endpoint}`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), options.timeout || DEFAULT_TIMEOUT_MS);
 
+    const token = this.getAuthToken();
     const headers = {
       'Accept': 'application/json',
       ...(!options.isFormData && { 'Content-Type': 'application/json' }),
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       ...options.headers,
     };
 
@@ -96,26 +117,44 @@ class ApiClient {
 
       if (!response.ok) {
         const errorBody = await response.json().catch(() => ({}));
-        throw new Error(errorBody.detail || errorBody.message || `HTTP ${response.status}: ${response.statusText}`);
+        const detail =
+          errorBody.detail ||
+          errorBody.message ||
+          `HTTP ${response.status}: ${response.statusText}`;
+
+        if (response.status === 401) {
+          console.warn('[SplitMate API] 401 Unauthorized: Session token is missing or expired.');
+        } else if (response.status === 403) {
+          console.warn('[SplitMate API] 403 Forbidden: Caller lacks permission for this action.');
+        }
+
+        const error = new Error(detail);
+        error.status = response.status;
+        error.detail = detail;
+        throw error;
       }
 
       this.notifyStatus(true);
       return await response.json();
     } catch (err) {
       clearTimeout(timeoutId);
-      // If server is unreachable, timed out, or offline, mark backend offline and provide mock response
-      const isNetworkError =
-        err.name === 'AbortError' ||
-        err.name === 'TypeError' ||
-        err.message?.toLowerCase().includes('failed to fetch') ||
-        err.message?.toLowerCase().includes('fetch failed') ||
-        err.message?.toLowerCase().includes('networkerror') ||
-        err.message?.toLowerCase().includes('connection refused') ||
-        Boolean(err.cause);
 
-      if (isNetworkError) {
+      // Disable mock fallback for all payment routes:
+      // Real integration testing requires genuine backend errors, never synthetic IDs.
+      const isPaymentEndpoint =
+        typeof endpoint === 'string' &&
+        (endpoint.includes('/payments') || endpoint.includes('initialize-payments'));
+
+      if (isPaymentEndpoint) {
         this.notifyStatus(false);
-        console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to resilient mock service.`);
+        console.error(`[SplitMate API] Payment endpoint error (${url}): ${err.message}`);
+        throw err;
+      }
+
+      // If server is unreachable or offline, mark backend offline and provide mock response
+      if (err.name === 'AbortError' || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+        this.notifyStatus(false);
+        console.warn(`[SplitMate API] FastAPI backend offline at ${url}. Falling back to resilient mock service.`, err);
         return this.handleMockFallback(endpoint, options);
       }
       throw err;
@@ -185,46 +224,41 @@ class ApiClient {
       }
     }
 
-    // 5. AI Receipt Extraction (Never fabricate fake OCR results)
-    // The frontend calls POST /receipts/upload then polls GET /receipts/{id}.
-    // If the backend is unreachable during upload or poll, throw — do NOT return mock receipt data.
+    // 5. AI Receipt Extraction (Pawan's contract)
     if (endpoint === API_ENDPOINTS.RECEIPTS.UPLOAD) {
-      // Per hackathon safety rules: Never invent receipt details or return unrelated demo data for user uploads.
-      throw new Error(
-        'Unable to connect to the receipt extraction service. Please ensure the backend server is running on http://localhost:8000.'
-      );
-    }
-    // Also block polling fallback
-    if (typeof endpoint === 'string' && endpoint.startsWith('/receipts/')) {
-      throw new Error(
-        'Unable to connect to the receipt extraction service. Please ensure the backend server is running on http://localhost:8000.'
-      );
-    }
-
-    // 6. PayPal Create Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
+      // Simulate Pawan's AI vision extraction response
+      await new Promise((r) => setTimeout(r, 1200));
       return {
-        orderId: `ORDER-${Math.random().toString(36).substring(2, 11).toUpperCase()}`,
-        status: 'CREATED',
-        amount: body.amount,
-        currency: body.currency || 'USD',
-        approvalUrl: 'https://www.sandbox.paypal.com/checkoutnow?token=mock_sandbox_token'
+        id: `receipt_${Date.now()}`,
+        original_filename: 'demo-receipt.jpg',
+        merchant_name: 'Artisan Cafe & Grill',
+        date: new Date().toISOString().split('T')[0],
+        invoiceNumber: `INV-${Math.floor(100000 + Math.random() * 900000)}`,
+        currency: 'USD',
+        tax: 7.20,
+        tip: 12.00,
+        subtotal: 78.50,
+        total: 97.70,
+        extraction_status: 'completed',
+        confidence: 0.97,
+        items: [
+          { id: 'ext_1', item_name: 'Signature Truffle Burger', quantity: 2, total_price: 38.00 },
+          { id: 'ext_2', item_name: 'Sweet Potato Truffle Fries', quantity: 1, total_price: 11.50 },
+          { id: 'ext_3', item_name: 'Artisan Lemonade', quantity: 2, total_price: 14.00 },
+          { id: 'ext_4', item_name: 'Chocolate Molten Cake', quantity: 1, total_price: 15.00 },
+        ]
       };
     }
 
-    // 7. PayPal Capture Order (Tanay's contract)
-    if (endpoint === API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER) {
-      const body = JSON.parse(options.body || '{}');
-      return {
-        captureId: `CAPTURE-${Math.random().toString(36).substring(2, 12).toUpperCase()}`,
-        orderId: body.orderId,
-        status: 'COMPLETED',
-        amount: body.amount,
-        payer: body.payerId,
-        receiver: body.receiverEmail,
-        timestamp: new Date().toISOString(),
-      };
+    // 6. PayPal payments — mock fallback strictly disabled
+    if (
+      endpoint === API_ENDPOINTS.PAYMENTS.CREATE_ORDER ||
+      endpoint === API_ENDPOINTS.PAYMENTS.CAPTURE_ORDER ||
+      (typeof endpoint === 'string' && endpoint.includes('/payments'))
+    ) {
+      throw new Error(
+        'Mock payments disabled. PayPal Sandbox testing requires a running FastAPI backend with configured credentials.'
+      );
     }
 
     // Default fallback

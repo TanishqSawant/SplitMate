@@ -66,7 +66,7 @@ def test_upload_receipt(client):
     data = response.json()
     assert data["original_filename"] == "receipt.jpg"
     assert data["extraction_status"] == "pending"
-    assert "id" in data
+    assert "receipt_id" in data
 
 
 def test_upload_receipt_invalid_type(client):
@@ -79,11 +79,12 @@ def test_upload_receipt_invalid_type(client):
 def test_get_receipt(client):
     upload_resp = _upload(client, "receipt.png", VALID_PNG_BYTES, "image/png")
     assert upload_resp.status_code == 201
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.get(f"/api/receipts/{receipt_id}")
     assert response.status_code == 200
     assert response.json()["original_filename"] == "receipt.png"
+    assert response.json()["receipt_id"] == receipt_id
 
 
 def test_get_receipt_not_found(client):
@@ -151,7 +152,7 @@ def test_submit_extraction(client):
     """Fix 3: Correct AI key allows extraction to proceed."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
     assert upload_resp.status_code == 201
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -168,7 +169,7 @@ def test_submit_extraction(client):
 def test_submit_extraction_duplicate(client):
     """Duplicate extraction submission is rejected with 409."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     payload = {
         "merchant_name": "Test",
@@ -202,7 +203,7 @@ def test_submit_extraction_duplicate(client):
 def test_extraction_missing_ai_key_returns_401(client):
     """Fix 3 — scenario 7: Missing X-Internal-Service-Key header returns 401."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -216,7 +217,7 @@ def test_extraction_missing_ai_key_returns_401(client):
 def test_extraction_incorrect_ai_key_returns_403(client):
     """Fix 3 — scenario 8: Wrong X-Internal-Service-Key header returns 403."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -230,7 +231,7 @@ def test_extraction_incorrect_ai_key_returns_403(client):
 def test_extraction_correct_ai_key_returns_200(client):
     """Fix 3 — scenario 9: Correct X-Internal-Service-Key header returns 200."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -241,6 +242,91 @@ def test_extraction_correct_ai_key_returns_200(client):
     assert response.json()["extraction_status"] == "completed"
 
 
+def test_trigger_extract_receipt(client):
+    """Trigger AI extraction on an uploaded receipt."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["receipt_id"]
+
+    extract_resp = client.post(f"/api/receipts/{receipt_id}/extract")
+    assert extract_resp.status_code == 200
+    data = extract_resp.json()
+    assert data["extraction_status"] == "completed"
+    assert len(data["items"]) > 0
+    assert data["total"] is not None
+
+
+def test_extract_corrupted_image_fails_gracefully(client):
+    """Corrupted image file must fail extraction gracefully with FAILED status and no mock data."""
+    # SOI marker + 100 nulls passes upload magic check but cannot be decoded by image engines
+    corrupted_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 100
+    upload_resp = _upload(client, "corrupted.jpg", corrupted_bytes, "image/jpeg")
+    receipt_id = upload_resp.json()["receipt_id"]
+
+    extract_resp = client.post(f"/api/receipts/{receipt_id}/extract")
+    assert extract_resp.status_code == 200
+    data = extract_resp.json()
+    assert data["extraction_status"] == "failed"
+    assert len(data["items"]) == 0
+    assert data["total"] is None
+
+
+def test_update_receipt_items(client):
+    """Review and edit extracted items on a receipt."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["receipt_id"]
+
+    edit_payload = {
+        "merchant_name": "Edited Italian Bistro",
+        "currency": "USD",
+        "tax": "3.50",
+        "items": [
+            {
+                "item_name": "Custom Pizza",
+                "quantity": 2,
+                "unit_price": "14.00",
+                "total_price": "28.00",
+            },
+            {
+                "item_name": "Sparkling Water",
+                "quantity": 1,
+                "unit_price": "4.00",
+                "total_price": "4.00",
+            },
+        ],
+    }
+
+    update_resp = client.put(f"/api/receipts/{receipt_id}/items", json=edit_payload)
+    assert update_resp.status_code == 200
+    data = update_resp.json()
+    assert data["merchant_name"] == "Edited Italian Bistro"
+    assert data["subtotal"] == "32.00"
+    assert data["tax"] == "3.50"
+    assert data["total"] == "35.50"
+    assert len(data["items"]) == 2
+
+
+def test_get_receipt_image(client):
+    """Stream uploaded receipt image for UI preview."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["receipt_id"]
+
+    img_resp = client.get(f"/api/receipts/{receipt_id}/image")
+    assert img_resp.status_code == 200
+    assert len(img_resp.content) > 0
+
+
+def test_get_sample_receipts(client):
+    """Verify preloaded sample receipts endpoint returns valid items."""
+    resp = client.get("/api/receipts/samples")
+    assert resp.status_code == 200
+    samples = resp.json()
+    assert len(samples) == 3
+    sample_ids = [s["id"] for s in samples]
+    assert "rcpt_bistro" in sample_ids
+    assert "rcpt_wholefoods" in sample_ids
+    assert "rcpt_bluebottle" in sample_ids
+
+
 # ---------------------------------------------------------------------------
 # AI Receipt Extraction Integration Tests (Fractional, Nullable, Review)
 # ---------------------------------------------------------------------------
@@ -248,7 +334,7 @@ def test_extraction_correct_ai_key_returns_200(client):
 def test_submit_extraction_with_fractional_quantities(client):
     """Fractional Decimal quantities are accepted, persisted, and returned."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     payload = {
         "merchant_name": "Artisan Bakery",
@@ -281,7 +367,7 @@ def test_submit_extraction_with_fractional_quantities(client):
 def test_submit_extraction_with_nullable_prices_and_quantities(client):
     """Missing quantities/prices are supported and mark extraction as review_required."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     payload = {
         "merchant_name": "Farmers Market",
@@ -316,7 +402,7 @@ def test_submit_extraction_with_nullable_prices_and_quantities(client):
 def test_submit_extraction_missing_merchant_and_totals(client):
     """Missing merchant_name, totals, and empty items are accepted as review_required."""
     upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     payload = {
         "merchant_name": None,

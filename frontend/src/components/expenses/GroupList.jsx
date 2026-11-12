@@ -69,7 +69,7 @@ export default function GroupList({ onSelectGroup, onCreateGroup }) {
                 {/* Member avatars */}
                 <div className="flex items-center -space-x-1.5 mt-3">
                   {group.members?.map((m) => {
-                    const memberUser = allUsers.find((u) => u.id === m.userId);
+                    const memberUser = allUsers?.find((u) => u.id === m.userId);
                     return (
                       <img
                         key={m.userId}

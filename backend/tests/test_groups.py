@@ -80,3 +80,59 @@ def test_list_members(client):
     names = {m["name"] for m in members}
     assert names == {"Alice", "Bob"}
 
+
+def test_list_groups(client):
+    client.post("/api/groups", json={"name": "Group A"})
+    client.post("/api/groups", json={"name": "Group B"})
+
+    response = client.get("/api/groups")
+    assert response.status_code == 200
+    groups = response.json()
+    assert len(groups) >= 2
+    names = [g["name"] for g in groups]
+    assert "Group A" in names
+    assert "Group B" in names
+
+
+def test_update_group(client):
+    create_resp = client.post("/api/groups", json={"name": "Original Group Name"})
+    assert create_resp.status_code == 201
+    group_id = create_resp.json()["id"]
+
+    update_resp = client.put(f"/api/groups/{group_id}", json={"name": "Renamed Squad"})
+    assert update_resp.status_code == 200
+    assert update_resp.json()["name"] == "Renamed Squad"
+
+
+def test_delete_group(client):
+    create_resp = client.post("/api/groups", json={"name": "To Delete"})
+    assert create_resp.status_code == 201
+    group_id = create_resp.json()["id"]
+
+    del_resp = client.delete(f"/api/groups/{group_id}")
+    assert del_resp.status_code == 204
+
+    # Verify group is gone
+    get_resp = client.get(f"/api/groups/{group_id}")
+    assert get_resp.status_code == 404
+
+
+def test_remove_member(client):
+    create_resp = client.post("/api/groups", json={"name": "Member Test Group"})
+    group_id = create_resp.json()["id"]
+
+    add_resp = client.post(
+        f"/api/groups/{group_id}/members",
+        json={"name": "Charlie", "email": "charlie@example.com"},
+    )
+    assert add_resp.status_code == 201
+    member_id = add_resp.json()["id"]
+
+    del_resp = client.delete(f"/api/groups/{group_id}/members/{member_id}")
+    assert del_resp.status_code == 204
+
+    # Verify member is gone
+    list_resp = client.get(f"/api/groups/{group_id}/members")
+    assert list_resp.status_code == 200
+    assert len(list_resp.json()) == 0
+

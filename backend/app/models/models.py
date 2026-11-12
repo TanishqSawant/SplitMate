@@ -80,6 +80,49 @@ class PaymentStatus(str, enum.Enum):
 # Models
 # ---------------------------------------------------------------------------
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(
+        String(320), unique=True, index=True, nullable=False
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    paypal_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    avatar: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    @property
+    def hashed_password(self) -> str:
+        return self.password_hash
+
+    @hashed_password.setter
+    def hashed_password(self, val: str) -> None:
+        self.password_hash = val
+
+    # Relationships
+    groups_created: Mapped[list["ExpenseGroup"]] = relationship(
+        back_populates="creator"
+    )
+    receipts_uploaded: Mapped[list["Receipt"]] = relationship(
+        back_populates="uploader"
+    )
+    group_memberships: Mapped[list["GroupMember"]] = relationship(
+        back_populates="user"
+    )
+
+
 class ExpenseGroup(Base):
     __tablename__ = "expense_groups"
 
@@ -87,16 +130,26 @@ class ExpenseGroup(Base):
         UUID(), primary_key=True, default=uuid.uuid4
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    creator_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     # Relationships
+    creator: Mapped["User | None"] = relationship(back_populates="groups_created")
     members: Mapped[list["GroupMember"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
     expenses: Mapped[list["Expense"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_expense_groups_creator_id", "creator_id"),
     )
 
 
@@ -111,6 +164,11 @@ class GroupMember(Base):
         ForeignKey("expense_groups.id", ondelete="CASCADE"),
         nullable=False,
     )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -119,6 +177,7 @@ class GroupMember(Base):
 
     # Relationships
     group: Mapped["ExpenseGroup"] = relationship(back_populates="members")
+    user: Mapped["User | None"] = relationship(back_populates="group_memberships")
     assignments: Mapped[list["ExpenseAssignment"]] = relationship(
         back_populates="member", cascade="all, delete-orphan"
     )
@@ -128,6 +187,7 @@ class GroupMember(Base):
 
     __table_args__ = (
         Index("ix_group_members_group_id", "group_id"),
+        Index("ix_group_members_user_id", "user_id"),
         Index("ix_group_members_email", "email"),
     )
 
@@ -138,28 +198,52 @@ class Receipt(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(), primary_key=True, default=uuid.uuid4
     )
+    uploader_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_file_path: Mapped[str] = mapped_column(Text, nullable=False)
     merchant_name: Mapped[str | None] = mapped_column(String(255))
-    currency: Mapped[str | None] = mapped_column(String(3), default="USD", nullable=True)
+    document_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # currency is nullable — never default to any currency; None means unknown
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     subtotal: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     tax: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     total: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     extraction_status: Mapped[ExtractionStatus] = mapped_column(
-        Enum(ExtractionStatus, name="extraction_status_enum"),
+        Enum(
+                ExtractionStatus,
+                name="extraction_status_enum",
+                 values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            ),
         default=ExtractionStatus.PENDING,
         nullable=False,
     )
+    # Extraction quality metadata persisted from Pawan's service
+    missing_fields: Mapped[str | None] = mapped_column(Text, nullable=True)       # JSON array
+    uncertain_fields: Mapped[str | None] = mapped_column(Text, nullable=True)     # JSON array
+    warnings: Mapped[str | None] = mapped_column(Text, nullable=True)             # JSON array
+    confidence: Mapped[float | None] = mapped_column(nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_user_reviewed: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     # Relationships
+    uploader: Mapped["User | None"] = relationship(back_populates="receipts_uploaded")
     items: Mapped[list["ReceiptItem"]] = relationship(
         back_populates="receipt", cascade="all, delete-orphan"
     )
     expenses: Mapped[list["Expense"]] = relationship(
         back_populates="receipt"
+    )
+
+    __table_args__ = (
+        Index("ix_receipts_uploader_id", "uploader_id"),
     )
 
 
@@ -175,6 +259,7 @@ class ReceiptItem(Base):
         nullable=False,
     )
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Decimal quantity supports fractions (e.g. 0.5 kg) — mirrors Pawan's Decimal | None contract
     quantity: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     total_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
@@ -293,7 +378,11 @@ class Payment(Base):
     paypal_order_id: Mapped[str | None] = mapped_column(String(50))
     paypal_capture_id: Mapped[str | None] = mapped_column(String(50))
     status: Mapped[PaymentStatus] = mapped_column(
-        Enum(PaymentStatus, name="payment_status_enum"),
+        Enum(
+                PaymentStatus,
+                name="payment_status_enum",
+                values_callable=lambda enum_cls: [item.value for item in enum_cls],
+            ),
         default=PaymentStatus.PENDING,
         nullable=False,
     )

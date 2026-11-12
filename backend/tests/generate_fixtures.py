@@ -187,7 +187,6 @@ def generate_fixtures():
     img_05.save(pdf_path, "PDF", resolution=150.0)
     print("Created receipt_05_digital_invoice.pdf")
 
-
 if __name__ == "__main__":
     generate_fixtures()
 

@@ -1,0 +1,69 @@
+"""FastAPI dependencies for authentication and database sessions."""
+
+import uuid
+from typing import Annotated
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
+
+from app.core.security import REVOKED_TOKENS, decode_access_token
+from app.db.session import get_db
+from app.models.models import User
+
+# HTTP Bearer scheme with auto_error=False so we control the exact 401 response and headers
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> User:
+    """Dependency: Extract, decode, and validate the JWT Bearer token.
+
+    Returns the authenticated User model.
+    Raises HTTP 401 if the token is missing, expired, invalid, or if the user no longer exists.
+    """
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please provide a valid Bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+    if token in REVOKED_TOKENS:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has been revoked or logged out. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    payload = decode_access_token(token)
+    user_id_str = payload.get("sub")
+    if not user_id_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        user_id = uuid.UUID(user_id_str)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user
+

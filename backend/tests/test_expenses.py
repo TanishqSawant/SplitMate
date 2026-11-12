@@ -39,7 +39,7 @@ def _upload_and_extract(client, subtotal="40.00", tax="3.20", total="43.20"):
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
     assert upload_resp.status_code == 201, f"Upload failed: {upload_resp.json()}"
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     extraction = {
         "merchant_name": "Test Restaurant",
@@ -81,7 +81,7 @@ def test_create_expense(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -89,7 +89,7 @@ def test_create_expense(client):
     assert response.status_code == 201
     data = response.json()
     assert data["group_id"] == group_id
-    assert data["receipt_id"] == receipt["id"]
+    assert data["receipt_id"] == receipt["receipt_id"]
 
 
 def test_create_expense_group_not_found(client):
@@ -114,7 +114,7 @@ def test_assign_and_split_with_tax(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -173,7 +173,7 @@ def test_split_item_between_members(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "25.00",
             "currency": "USD",
         },
@@ -215,7 +215,7 @@ def test_splits_endpoint_is_read_only(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",   # must match extracted total
             "currency": "USD",
         },
@@ -262,7 +262,7 @@ def test_initialize_payments_success(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -310,7 +310,7 @@ def test_initialize_payments_conflict_when_captured(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -361,7 +361,7 @@ def test_cross_group_assignment_rejected(client):
         "/api/expenses",
         json={
             "group_id": group1_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -394,7 +394,7 @@ def test_cross_receipt_item_assignment_rejected(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt1["id"],
+            "receipt_id": receipt1["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -427,7 +427,7 @@ def test_over_assignment_rejected(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -457,14 +457,19 @@ def test_over_assignment_rejected(client):
 
 
 def test_penny_rounding_reconciliation(client):
-    """3 members splitting an odd amount ($10.00) reconcile to exactly $10.00 down to the penny."""
+    """3 members splitting an odd amount ($10.00) reconcile to exactly $10.00 down to the penny.
+
+    Uses a single item (Combo Meal, qty=1, price=$10) with 3 members each claiming
+    a fractional share (0.3334, 0.3333, 0.3333) of the available unit.
+    The split calculator must produce [3.33, 3.33, 3.34] with a 1-penny reconciliation step.
+    """
     group_id, member_ids = _setup_group_with_members(client, ["Alice", "Bob", "Charlie"])
 
     upload_resp = client.post(
         "/api/receipts/upload",
         files={"file": ("r.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
     client.post(
         f"/api/receipts/{receipt_id}/extraction",
         json={
@@ -476,9 +481,9 @@ def test_penny_rounding_reconciliation(client):
             "items": [
                 {
                     "item_name": "Combo Meal",
-                    "quantity": 3,
-                    "unit_price": "3.33",
-                    "total_price": "10.00",
+                    "quantity": "1",
+                    "unit_price": "10.00",
+                    "total_price": "10.00",   # 1 × 10.00 = 10.00 ✓
                 }
             ],
         },
@@ -497,13 +502,16 @@ def test_penny_rounding_reconciliation(client):
     )
     expense_id = expense_resp.json()["id"]
 
+    # 3 members claim fractional shares of the single unit summing to 1.0000.
+    # Raw amounts: 10.00 × (0.3334/1) = 3.334, 10.00 × (0.3333/1) = 3.333 ×2.
+    # Rounded: 3.33, 3.33, 3.33 → sum=9.99 → 1 penny distributed → [3.33, 3.33, 3.34].
     client.post(
         f"/api/expenses/{expense_id}/assign",
         json={
             "assignments": [
-                {"receipt_item_id": item_id, "member_id": member_ids[0], "share_quantity": "1"},
-                {"receipt_item_id": item_id, "member_id": member_ids[1], "share_quantity": "1"},
-                {"receipt_item_id": item_id, "member_id": member_ids[2], "share_quantity": "1"},
+                {"receipt_item_id": item_id, "member_id": member_ids[0], "share_quantity": "0.3334"},
+                {"receipt_item_id": item_id, "member_id": member_ids[1], "share_quantity": "0.3333"},
+                {"receipt_item_id": item_id, "member_id": member_ids[2], "share_quantity": "0.3333"},
             ]
         },
     )
@@ -530,7 +538,7 @@ def test_create_expense_total_matches_receipt(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -547,7 +555,7 @@ def test_create_expense_total_mismatches_receipt(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "50.00",   # intentionally wrong
             "currency": "USD",
         },
@@ -565,7 +573,7 @@ def test_create_expense_receipt_extraction_pending(client):
         "/api/receipts/upload",
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
 
     response = client.post(
         "/api/expenses",
@@ -610,7 +618,7 @@ def test_initialize_payments_blocked_with_unassigned_items(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -645,7 +653,7 @@ def test_initialize_payments_blocked_with_partial_assignment(client):
         "/api/receipts/upload",
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json()["receipt_id"]
     client.post(
         f"/api/receipts/{receipt_id}/extraction",
         json={
@@ -709,7 +717,7 @@ def test_initialize_payments_succeeds_when_fully_assigned(client):
         "/api/expenses",
         json={
             "group_id": group_id,
-            "receipt_id": receipt["id"],
+            "receipt_id": receipt["receipt_id"],
             "total_amount": "43.20",
             "currency": "USD",
         },
@@ -739,6 +747,41 @@ def test_initialize_payments_succeeds_when_fully_assigned(client):
     assert len(resp.json()) == 2
 
 
+def test_update_expense(client):
+    """Test updating expense total_amount and currency."""
+    group_id, _ = _setup_group_with_members(client, ["Alice"])
+    exp_resp = client.post(
+        "/api/expenses",
+        json={"group_id": group_id, "total_amount": "50.00", "currency": "USD"},
+    )
+    assert exp_resp.status_code == 201
+    expense_id = exp_resp.json()["id"]
+
+    update_resp = client.put(
+        f"/api/expenses/{expense_id}",
+        json={"total_amount": "75.50", "currency": "USD"},
+    )
+    assert update_resp.status_code == 200
+    assert float(update_resp.json()["total_amount"]) == 75.50
+
+
+def test_delete_expense(client):
+    """Test deleting an expense."""
+    group_id, _ = _setup_group_with_members(client, ["Alice"])
+    exp_resp = client.post(
+        "/api/expenses",
+        json={"group_id": group_id, "total_amount": "25.00", "currency": "USD"},
+    )
+    expense_id = exp_resp.json()["id"]
+
+    del_resp = client.delete(f"/api/expenses/{expense_id}")
+    assert del_resp.status_code == 204
+
+    # Verify expense is deleted
+    get_resp = client.get(f"/api/expenses/{expense_id}")
+    assert get_resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Fractional & Incomplete Item Splitting Tests
 # ---------------------------------------------------------------------------
@@ -752,7 +795,7 @@ def test_create_expense_fails_when_receipt_review_required(client):
         "/api/receipts/upload",
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json().get("receipt_id") or upload_resp.json().get("id")
 
     client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -791,7 +834,7 @@ def test_assign_item_fails_when_item_has_insufficient_data(client):
         "/api/receipts/upload",
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json().get("receipt_id") or upload_resp.json().get("id")
 
     ext_resp = client.post(
         f"/api/receipts/{receipt_id}/extraction",
@@ -851,7 +894,7 @@ def test_itemized_splitting_with_fractional_item_quantity(client):
         "/api/receipts/upload",
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json().get("receipt_id") or upload_resp.json().get("id")
 
     # Receipt with fractional item: 2.5 kg at $10/kg = $25.00, tax $2.50, total $27.50
     ext_resp = client.post(
@@ -923,7 +966,7 @@ def test_assign_fractional_item_capacity_limit(client):
         "/api/receipts/upload",
         files={"file": ("receipt.jpg", io.BytesIO(VALID_JPEG_BYTES), "image/jpeg")},
     )
-    receipt_id = upload_resp.json()["id"]
+    receipt_id = upload_resp.json().get("receipt_id") or upload_resp.json().get("id")
 
     ext_resp = client.post(
         f"/api/receipts/{receipt_id}/extraction",
