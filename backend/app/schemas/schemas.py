@@ -117,9 +117,9 @@ class ReceiptItemResponse(BaseModel):
     id: UUID
     receipt_id: UUID
     item_name: str
-    quantity: Decimal | None
-    unit_price: Decimal | None
-    total_price: Decimal | None
+    quantity: Decimal | None = None
+    unit_price: Decimal | None = None
+    total_price: Decimal | None = None
 
     model_config = {"from_attributes": True}
 
@@ -128,11 +128,11 @@ class ReceiptResponse(BaseModel):
     receipt_id: UUID
     original_filename: str
     document_type: str | None = None
-    merchant_name: str | None
-    currency: str | None
-    subtotal: Decimal | None
-    tax: Decimal | None
-    total: Decimal | None
+    merchant_name: str | None = None
+    currency: str | None = None
+    subtotal: Decimal | None = None
+    tax: Decimal | None = None
+    total: Decimal | None = None
     extraction_status: str
     missing_fields: list[str] | None = None
     uncertain_fields: list[str] | None = None
@@ -145,6 +145,14 @@ class ReceiptResponse(BaseModel):
     items: list[ReceiptItemResponse] = []
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_id_to_receipt_id(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "receipt_id" not in data and "id" in data:
+                data["receipt_id"] = data["id"]
+        return data
 
     @classmethod
     def from_orm_receipt(cls, receipt: Any) -> "ReceiptResponse":
@@ -162,6 +170,7 @@ class ReceiptResponse(BaseModel):
 
         return cls(
             receipt_id=receipt.id,
+            id=receipt.id,
             original_filename=receipt.original_filename,
             document_type=getattr(receipt, "document_type", None),
             merchant_name=receipt.merchant_name,
@@ -193,7 +202,7 @@ class ReceiptItemExtraction(BaseModel):
 class ReceiptItemUpdate(BaseModel):
     id: UUID | None = None
     item_name: str = Field(..., min_length=1, max_length=255)
-    quantity: int = Field(default=1, ge=1)
+    quantity: Decimal = Field(default=Decimal("1"), gt=0, description="Positive quantity, may be fractional (e.g. 0.5 kg)")
     unit_price: Decimal = Field(default=Decimal("0.00"), ge=0, decimal_places=2)
     total_price: Decimal = Field(default=Decimal("0.00"), ge=0, decimal_places=2)
 
@@ -218,6 +227,35 @@ class ReceiptExtractionRequest(BaseModel):
     warnings: list[str] | None = None
     confidence: float | None = None
     document_type: str | None = None
+    extraction_status: str | None = Field(default=None, description="AI extraction status: completed, review_required, or failed")
+    status: str | None = Field(default=None, description="Alias for extraction_status")
+
+    @field_validator("merchant_name", mode="before")
+    @classmethod
+    def clean_merchant_name(cls, v: Any) -> str | None:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            stripped = v.strip()
+            return stripped if stripped else None
+        return str(v)
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def clean_currency(cls, v: Any) -> str | None:
+        if v is None or v == "":
+            return None
+        return str(v).strip().upper()
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_status_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "status" in data and not data.get("extraction_status"):
+                data["extraction_status"] = data["status"]
+            elif "extraction_status" in data and not data.get("status"):
+                data["status"] = data["extraction_status"]
+        return data
 
 
 # ---------------------------------------------------------------------------

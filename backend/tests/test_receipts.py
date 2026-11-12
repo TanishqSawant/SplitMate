@@ -1,7 +1,13 @@
 """Tests for the receipts API — including Fix 2 (magic-byte validation) and Fix 3 (AI key auth)."""
 
+from decimal import Decimal
 import io
 
+from app.schemas.schemas import ReceiptExtractionRequest
+from app.services.receipt_extractor.schemas import (
+    ExtractedLineItem,
+    ReceiptExtractionResult,
+)
 from tests.conftest import (
     TEST_INTERNAL_SERVICE_SECRET,
     VALID_JPEG_BYTES,
@@ -319,4 +325,143 @@ def test_get_sample_receipts(client):
     assert "rcpt_bistro" in sample_ids
     assert "rcpt_wholefoods" in sample_ids
     assert "rcpt_bluebottle" in sample_ids
+
+
+# ---------------------------------------------------------------------------
+# AI Receipt Extraction Integration Tests (Fractional, Nullable, Review)
+# ---------------------------------------------------------------------------
+
+def test_submit_extraction_with_fractional_quantities(client):
+    """Fractional Decimal quantities are accepted, persisted, and returned."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["receipt_id"]
+
+    payload = {
+        "merchant_name": "Artisan Bakery",
+        "currency": "USD",
+        "subtotal": "12.75",
+        "tax": "1.00",
+        "total": "13.75",
+        "items": [
+            {
+                "item_name": "Sourdough Loaf",
+                "quantity": "1.5",
+                "unit_price": "8.50",
+                "total_price": "12.75",
+            }
+        ],
+    }
+
+    response = client.post(
+        f"/api/receipts/{receipt_id}/extraction",
+        json=payload,
+        headers=AI_KEY_HEADER,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["extraction_status"] == "completed"
+    assert len(data["items"]) == 1
+    assert Decimal(str(data["items"][0]["quantity"])) == Decimal("1.5")
+
+
+def test_submit_extraction_with_nullable_prices_and_quantities(client):
+    """Missing quantities/prices are supported and mark extraction as review_required."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["receipt_id"]
+
+    payload = {
+        "merchant_name": "Farmers Market",
+        "currency": "USD",
+        "subtotal": None,
+        "tax": None,
+        "total": "15.00",
+        "items": [
+            {
+                "item_name": "Organic Tomatoes",
+                "quantity": None,
+                "unit_price": None,
+                "total_price": None,
+            }
+        ],
+    }
+
+    response = client.post(
+        f"/api/receipts/{receipt_id}/extraction",
+        json=payload,
+        headers=AI_KEY_HEADER,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["extraction_status"] == "review_required"
+    assert len(data["items"]) == 1
+    assert data["items"][0]["quantity"] is None
+    assert data["items"][0]["unit_price"] is None
+    assert data["items"][0]["total_price"] is None
+
+
+def test_submit_extraction_missing_merchant_and_totals(client):
+    """Missing merchant_name, totals, and empty items are accepted as review_required."""
+    upload_resp = _upload(client, "receipt.jpg", VALID_JPEG_BYTES, "image/jpeg")
+    receipt_id = upload_resp.json()["receipt_id"]
+
+    payload = {
+        "merchant_name": None,
+        "currency": None,
+        "subtotal": None,
+        "tax": None,
+        "total": None,
+        "items": [],
+        "extraction_status": "review_required",
+    }
+
+    response = client.post(
+        f"/api/receipts/{receipt_id}/extraction",
+        json=payload,
+        headers=AI_KEY_HEADER,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["merchant_name"] is None
+    assert data["currency"] is None
+    assert data["total"] is None
+    assert data["items"] == []
+    assert data["extraction_status"] == "review_required"
+
+
+def test_to_backend_contract_validates_in_receipt_extraction_request():
+    """Verify to_backend_contract payload satisfies ReceiptExtractionRequest schema."""
+    result = ReceiptExtractionResult(
+        is_receipt=True,
+        merchant_name="Fresh Greens",
+        currency="USD",
+        subtotal=Decimal("24.50"),
+        tax=Decimal("2.45"),
+        final_total=Decimal("26.95"),
+        items=[
+            ExtractedLineItem(
+                item_name="Baby Spinach",
+                quantity=Decimal("1.75"),
+                unit_price=Decimal("4.00"),
+                total_price=Decimal("7.00"),
+            ),
+            ExtractedLineItem(
+                item_name="Unpriced Herb",
+                quantity=None,
+                unit_price=None,
+                total_price=None,
+            ),
+        ],
+    )
+    result.evaluate_status()
+    payload = result.to_backend_contract()
+
+    # Must validate directly into ReceiptExtractionRequest without pydantic errors
+    req = ReceiptExtractionRequest(**payload)
+    assert req.merchant_name == "Fresh Greens"
+    assert req.currency == "USD"
+    assert req.total == Decimal("26.95")
+    assert len(req.items) == 2
+    assert req.items[0].quantity == Decimal("1.75")
+    assert req.items[1].quantity is None
+    assert req.items[1].unit_price is None
 

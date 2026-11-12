@@ -268,6 +268,16 @@ def assign_items(
                 detail=f"Member {a.member_id} is not part of this expense's group.",
             )
 
+        # Prevent splitting an item if its price or quantity data is insufficient
+        if item.quantity is None or item.total_price is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Receipt item '{item.item_name}' cannot be split due to insufficient price or quantity data. "
+                    "Complete receipt review first."
+                ),
+            )
+
         # Update simulated total for capacity checking
         existing = existing_map.get((a.receipt_item_id, a.member_id))
         prior_qty = existing.share_quantity if existing else Decimal("0")
