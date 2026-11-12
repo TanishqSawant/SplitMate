@@ -179,43 +179,88 @@ export function ExpenseProvider({ children }) {
     });
 
     try {
-      // Step 1: Uploading
+      // Step 1: Short pause so the UI shows "uploading" state
       await new Promise((r) => setTimeout(r, 600));
-      setReceiptScan((prev) => ({ ...prev, status: 'processing', progress: 65 }));
+      setReceiptScan((prev) => ({ ...prev, status: 'processing', progress: 50 }));
 
-      // Step 2: Request extraction from Pawan's endpoint
+      // Step 2: Upload and request synchronous extraction via ?auto_extract=true
+      // The backend runs RapidOCR + regex/LLM and returns extraction_status='completed'
+      // when successful, or 'failed' when OCR could not parse the receipt.
       const formData = new FormData();
-      // FastAPI's upload_receipt endpoint expects the multipart field name 'file'.
       formData.append('file', file);
 
-      const uploadedReceipt = await apiClient.request(API_ENDPOINTS.RECEIPTS.UPLOAD, {
-        method: 'POST',
-        body: formData,
-        isFormData: true,
-      });
+      const uploadedReceipt = await apiClient.request(
+        API_ENDPOINTS.RECEIPTS.UPLOAD + '?auto_extract=true',
+        {
+          method: 'POST',
+          body: formData,
+          isFormData: true,
+          timeout: 90000, // Allow up to 90 seconds for OCR + extraction
+        }
+      );
+
+      setReceiptScan((prev) => ({ ...prev, progress: 75 }));
+
+      // Step 3: If extraction is still pending, poll GET /receipts/{id} until done
+      let receipt = uploadedReceipt;
+      const receiptId = receipt.receipt_id || receipt.id;
+      if (receipt.extraction_status === 'pending' && receiptId) {
+        const MAX_POLLS = 20;
+        const POLL_INTERVAL_MS = 2000;
+        for (let i = 0; i < MAX_POLLS; i++) {
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+          try {
+            const polled = await apiClient.request(API_ENDPOINTS.RECEIPTS.GET(receiptId), {
+              method: 'GET',
+              timeout: 10000,
+            });
+            receipt = polled;
+            if (receipt.extraction_status === 'completed' || receipt.extraction_status === 'failed') {
+              break;
+            }
+          } catch (pollErr) {
+            console.warn('[SplitMate] Polling receipt status failed:', pollErr.message);
+            break;
+          }
+        }
+      }
 
       setReceiptScan((prev) => ({ ...prev, progress: 100 }));
       await new Promise((r) => setTimeout(r, 400));
 
-      // The current backend upload endpoint stores the receipt but does not run OCR.
-      // It returns extraction_status='pending' until the AI service submits results.
-      if (!uploadedReceipt.items || uploadedReceipt.items.length === 0) {
+      const finalReceiptId = receipt.receipt_id || receipt.id;
+
+      // Step 4: Handle extraction failure or empty result
+      if (receipt.extraction_status === 'failed') {
         setReceiptScan((prev) => ({
           ...prev,
           status: 'error',
-          receiptId: uploadedReceipt.id,
-          error: 'Receipt uploaded successfully, but AI extraction is not connected to the backend yet.',
+          receiptId: finalReceiptId,
+          error: 'OCR extraction failed. Please try a clearer receipt image.',
+        }));
+        return;
+      }
+
+      if (!receipt.items || receipt.items.length === 0) {
+        setReceiptScan((prev) => ({
+          ...prev,
+          status: 'error',
+          receiptId: finalReceiptId,
+          error:
+            receipt.extraction_status === 'pending'
+              ? 'Receipt uploaded. Extraction is still processing — please try again shortly.'
+              : 'No line items were found in this receipt. Please try a clearer image.',
         }));
         return;
       }
 
       const extraction = {
-        merchant: uploadedReceipt.merchant_name,
-        currency: uploadedReceipt.currency,
-        subtotal: uploadedReceipt.subtotal,
-        tax: uploadedReceipt.tax,
-        total: uploadedReceipt.total,
-        items: uploadedReceipt.items.map((item) => ({
+        merchant: receipt.merchant_name,
+        currency: receipt.currency,
+        subtotal: receipt.subtotal,
+        tax: receipt.tax,
+        total: receipt.total,
+        items: receipt.items.map((item) => ({
           id: item.id,
           name: item.item_name,
           quantity: item.quantity,
@@ -239,7 +284,7 @@ export function ExpenseProvider({ children }) {
           ...extraction,
           items: itemsWithAssignments,
         },
-        confidence: extraction.confidence || 0.95,
+        confidence: receipt.confidence || 0.95,
         error: null,
       });
     } catch (err) {

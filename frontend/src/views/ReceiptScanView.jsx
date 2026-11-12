@@ -20,6 +20,20 @@ import Badge from '../components/common/Badge';
 function classifyError(errorMsg) {
   const msg = (errorMsg || '').toLowerCase();
   if (
+    msg.includes('authentication required') ||
+    msg.includes('bearer token') ||
+    msg.includes('unauthorized') ||
+    msg.includes('session token')
+  ) {
+    return {
+      icon: AlertTriangle,
+      title: 'Authentication Required',
+      advice:
+        'A valid session token is required to upload receipts. Please sign in to your SplitMate account.',
+      color: 'amber',
+    };
+  }
+  if (
     msg.includes('unable to connect') ||
     msg.includes('unreachable') ||
     msg.includes('failed to fetch') ||

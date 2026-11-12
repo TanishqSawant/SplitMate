@@ -13,7 +13,7 @@ import {
 } from './mockData';
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
-const DEFAULT_TIMEOUT_MS = 6000;
+const DEFAULT_TIMEOUT_MS = 30000;
 
 class ApiClient {
   constructor() {
@@ -145,9 +145,15 @@ class ApiClient {
         typeof endpoint === 'string' &&
         (endpoint.includes('/payments') || endpoint.includes('initialize-payments'));
 
-      if (isPaymentEndpoint) {
+      // Disable mock fallback for all receipt routes:
+      // A 401 from the receipt endpoint means the user is not authenticated and must
+      // log in. Never silently return fake extracted data for an unauthenticated user.
+      const isReceiptEndpoint =
+        typeof endpoint === 'string' && endpoint.includes('/receipts');
+
+      if (isPaymentEndpoint || isReceiptEndpoint) {
         this.notifyStatus(false);
-        console.error(`[SplitMate API] Payment endpoint error (${url}): ${err.message}`);
+        console.error(`[SplitMate API] Endpoint error (${url}): ${err.message}`);
         throw err;
       }
 

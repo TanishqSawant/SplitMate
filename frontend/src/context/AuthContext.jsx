@@ -6,15 +6,20 @@ import { API_ENDPOINTS } from '../api/endpoints';
 const AuthContext = createContext();
 
 export function AuthProvider({ children }) {
+  // Only restore user from localStorage when a real JWT token also exists.
+  // Without a token the user is unauthenticated regardless of any saved profile.
   const [currentUser, setCurrentUser] = useState(() => {
+    const token = localStorage.getItem('splitmate_token');
+    if (!token) return null;
     const saved = localStorage.getItem('splitmate_auth_user');
-    return saved ? JSON.parse(saved) : MOCK_USERS[0];
+    return saved ? JSON.parse(saved) : null;
   });
   const [token, setToken] = useState(() => {
     return localStorage.getItem('splitmate_token') || null;
   });
+  // Authenticated only when a real JWT token is present in localStorage.
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    return Boolean(localStorage.getItem('splitmate_token') || localStorage.getItem('splitmate_auth_user'));
+    return Boolean(localStorage.getItem('splitmate_token'));
   });
   const [isLoading, setIsLoading] = useState(false);
 
@@ -36,12 +41,13 @@ export function AuthProvider({ children }) {
     }
   }, [token]);
 
-  // Demo user quick-switch (essential for hackathon team demonstration)
+  // Demo user quick-switch – only allowed when a real JWT token already exists.
+  // Without a real token this would create a false "authenticated" state.
   const switchUser = (userId) => {
+    if (!token) return; // Guard: never switch to a mock user without a real session
     const found = MOCK_USERS.find((u) => u.id === userId);
     if (found) {
       setCurrentUser(found);
-      setIsAuthenticated(true);
     }
   };
 

@@ -161,7 +161,7 @@ export default function AuthView() {
 
           {mode === 'login' && (
             <p className="text-xs text-center text-slate-500 dark:text-slate-400 mt-4">
-              Demo mode: Use any email/password to test the backend integration
+              Sign in with your registered SplitMate account
             </p>
           )}
         </div>
